@@ -33,10 +33,15 @@ The following parts are needed to build it:
 * For the audio amplifier: a LM386 integrated circuit, an 8 ohm small speaker and some resistors and capacitors. The schematics are in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche%20ampli.pdf. The audio signal is taken from the GPIO, it does not use the audio output jack, so it also works on a Raspberry Pi Zero.
 
 ##Software
-The robot runs on raspbian, I have tested it on the releases from mid 2016. It is a C program. It makes use of the [pigpio library] (http://abyz.co.uk/rpi/pigpio/) for GPIO. 
+The robot runs on raspbian, I have tested it on the releases from mid 2016. It is programed in C. It makes use of the [pigpio library] (http://abyz.co.uk/rpi/pigpio/) for GPIO access. It also needs the bluetooth and alsa libraries.
+The program avoids active loops in order to use light use of CPU. Its CPU usage is about 7% (which is due to pigpio). It makes use of event loops and semaphores in order to avoid active loops.
 
-After copying the files, run ´make robot´.
+The following packages need to be installed (`sudo apt-get install`):
+* libbluetooth-dev
+* libcwiid-dev
+* libasound2-dev
 
+After installing them copy the files and run `make robot`. After compiling, run it with `sudo ./robot`.
 
 
   
