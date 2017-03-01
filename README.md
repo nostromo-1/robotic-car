@@ -28,10 +28,15 @@ The following parts are needed to build it:
 * 4 motors (if 4WD) or 2 motors (if 2WD)
 * Motor controller: a L298N based circuit board, like http://www.leantec.es/motores-y-controladores/82-l298-controlador-de-motores-con-doble-puente-h.html
 * Distance sensor HC-SR04
-* A Raspberry pi. I use a Raspberry Pi 3 Model B, it has built-in bluetooth and wifi. You can also use a Raspberry Pi Zero with a USB hub (like https://shop.pimoroni.com/products/zero4u), a wifi dongle and a bluetooth dongle.
+* A Raspberry pi. I use a Raspberry Pi 3 Model B, it has built-in bluetooth and wifi. You can also use a Raspberry Pi Zero with a USB hub (like https://shop.pimoroni.com/products/zero4u), a wifi dongle and a bluetooth dongle. Or the newly released Pi Zero W!
 * Transistors, capacitors, resistors, push button and LED for voltage checker and scan button. A 6V buzzer. The schematics can be seen in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche.pdf
 * For the audio amplifier: a LM386 integrated circuit, an 8 ohm small speaker and some resistors and capacitors. The schematics are in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche%20ampli.pdf. The audio signal is taken from the GPIO, it does not use the audio output jack, so it also works on a Raspberry Pi Zero.
 
 ##Software
+The robot runs on raspbian, I have tested it on the releases from mid 2016. It is a C program. It makes use of the [pigpio library] (http://abyz.co.uk/rpi/pigpio/) for GPIO. 
+
+After copying the files, run ´make robot´.
+
+
 
   
