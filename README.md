@@ -41,7 +41,7 @@ The following packages need to be installed (`sudo apt-get install`):
 * libcwiid-dev
 * libasound2-dev
 
-After installing them copy the files and run `make robot`. After compiling, run it with `sudo ./robot`.
+After installing them copy the C files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `sudo ./robot`.
 
 
   
