@@ -20,6 +20,8 @@ Realiza el control principal del coche
 #include <pigpio.h>
 #include <cwiid.h>
 
+extern char *optarg;
+extern int optind, opterr, optopt;
 
 #define MI_ENA 17
 #define MI_IN1 27
@@ -38,6 +40,8 @@ Realiza el control principal del coche
 #define WMSCAN_PIN 12
 #define AUDR_PIN 18
 #define AUDR_ALT PI_ALT5   /* ALT function for audio pin, ALT5 for pin 18 */
+#define LSENSOR_PIN 5
+#define RSENSOR_PIN 6
 
 #define DISTMIN 50  /* distancia a la que entendemos que hay un obstáculo */
 
@@ -45,14 +49,19 @@ Realiza el control principal del coche
 void* play_wav(void *filename);  // Función en fichero sound.c
 volatile int playing_audio, cancel_audio;  // Variables compartidas con fichero sound.c
 
+void speedSensor(int gpio, int level, uint32_t tick);
+void wmScan(int gpio, int level, uint32_t tick);
+
  
 /****************** Variables y tipos globales **************************/
 
 typedef enum {ADELANTE=0, ATRAS=1} Sentido_t;
 typedef struct {
-    const uint en_pin, in1_pin, in2_pin;  /* Pines  BCM */
+    const uint en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
     Sentido_t sentido;   /* ADELANTE, ATRAS */
-    int velocidad;         /* -100 a 100 */
+    int velocidad;       /* -100 a 100 */
+    uint32_t t_on;
+    volatile int freq;
 } Motor_t;
 
 
@@ -71,12 +80,14 @@ typedef struct {
 
 volatile uint32_t distancia = UINT32_MAX;
 volatile int velocidad = 50;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
-volatile int powerState = PI_OFF;
+volatile int powerState = PI_ON;
 volatile int esquivando;
 sem_t semaphore;
-
-
+int remoteOnly;
+int checkBattery = 1;
+char *alarmFile = "sounds\\police.wav";
 MandoWii_t mando;
+
 
 Bocina_t bocina = {
     .pitando = 0,
@@ -88,18 +99,17 @@ Motor_t m_izdo = {
     .en_pin = MI_ENA,
     .in1_pin = MI_IN1,
     .in2_pin = MI_IN2,
-    .sentido = ADELANTE,
-    .velocidad = 0
+    .sensor_pin = LSENSOR_PIN,
+    .sentido = ADELANTE
 };
 
 Motor_t m_dcho = {
     .en_pin = MD_ENA,
     .in1_pin = MD_IN1,
     .in2_pin = MD_IN2,
-    .sentido = ADELANTE,
-    .velocidad = 0
+    .sensor_pin = RSENSOR_PIN,
+    .sentido = ADELANTE
 };
-
 
 
 
@@ -157,6 +167,11 @@ int setupMotor(Motor_t *motor)
     
     if (gpioSetPWMfrequency(motor->en_pin, 100)<0) r = -1;   /* 100 Hz */
     if (gpioSetPWMrange(motor->en_pin, 100)<0) r = -1;       /* Máximo: 100%, real range = 2000 */
+    
+    r |= gpioSetMode(motor->sensor_pin, PI_INPUT);
+    gpioSetAlertFunc(motor->sensor_pin, speedSensor);
+    gpioGlitchFilter(motor->sensor_pin, 1000);      
+    
     if (r) fprintf(stderr, "Cannot initialise motor!\n");
     return r;
 }
@@ -208,13 +223,13 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            
            /* Calculate moving average */
            for (i=0, suma=0; i<NUMPOS; i++) suma += distance_array[i]; 
-            distancia = suma/NUMPOS;   /* La variable de salida, global */
-           if (distancia < DISTMIN && esquivando == 0) {
+           distancia = suma/NUMPOS;   /* La variable de salida, global */
+           if (!remoteOnly && distancia < DISTMIN && esquivando == 0) {
                 esquivando = 1;
                 i = sem_post(&semaphore);
                 if (i) perror("Error al activar semáforo");
            }
-              break;
+           break;
  } 
 }
 
@@ -226,8 +241,8 @@ int setupSonar(void)
    gpioSetMode(SONAR_ECHO, PI_INPUT);
 
    /* update sonar 20 times a second, timer #0 */
-   if (gpioSetTimerFunc(0, 50, sonarTrigger) ||    /* every 50ms */
-       gpioSetAlertFunc(SONAR_ECHO, sonarEcho)) {  /* monitor sonar echos */
+   if (gpioSetTimerFunc(0, 50, sonarTrigger) ||     /* every 50ms */
+        gpioSetAlertFunc(SONAR_ECHO, sonarEcho)) {  /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
         return -1;
        }
@@ -387,7 +402,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
             
             /*** sonido ***/
             if (~previous_buttons&CWIID_BTN_UP && mando.buttons&CWIID_BTN_UP) {
-                audioplay("sounds/police.wav", 0);
+                audioplay(alarmFile, 0);
             }
         
             /*** End of buttons loop ***/
@@ -464,6 +479,32 @@ static int button;
 }
 
 
+/* callback llamado cuando el pin LSENSOR_PIN o RSENSOR_PIN cambia de estado
+Se usa para medir la velocidad de rotación de las ruedas */
+void speedSensor(int gpio, int level, uint32_t tick)
+{
+uint32_t period;
+Motor_t *motor;
+
+    switch (gpio) {
+        case LSENSOR_PIN: motor = &m_izdo; break;
+        case RSENSOR_PIN: motor = &m_dcho; break; 
+    }
+
+    switch (level) {
+        case PI_ON:   
+            period = tick - motor->t_on;
+            motor->freq = 1000000/period;
+            printf("gpio %d: f=%u, rpm=%u\n", gpio, motor->freq, motor->freq*60/21);
+            
+            motor->t_on = tick;
+            break;
+        case PI_OFF:  
+            break;
+    }    
+    
+    
+}
 
 
 /****************** Funciones auxiliares varias **************************/
@@ -551,11 +592,12 @@ int setup(void)
    gpioWrite(bocina.pin, PI_OFF);
    gpioSetMode(AUDR_PIN, AUDR_ALT);  // Saca PWM0 (audio right) por el GPIO al amplificador
    
-   gpioSetMode(VBAT_PIN, PI_INPUT);
-   gpioSetPullUpDown(VBAT_PIN, PI_PUD_DOWN);  // pull-down resistor; avoids floating pin if circuit not connected  
-   gpioSetTimerFunc(1, 15000, getPowerState);  // Comprueba tensión motores cada 15 seg, timer#1
-   getPowerState();    
-   
+   if (checkBattery) { 
+    gpioSetMode(VBAT_PIN, PI_INPUT);
+    gpioSetPullUpDown(VBAT_PIN, PI_PUD_DOWN);  // pull-down resistor; avoids floating pin if circuit not connected  
+    gpioSetTimerFunc(1, 15000, getPowerState);  // Comprueba tensión motores cada 15 seg, timer#1
+    getPowerState();    
+   }
    gpioSetMode(WMSCAN_PIN, PI_INPUT);
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_UP);  // pull-up resistor; button pressed == OFF
    gpioGlitchFilter(WMSCAN_PIN, 100000);      // 0,1 sec filter
@@ -565,7 +607,7 @@ int setup(void)
    
    if (powerState == PI_OFF) {
        fprintf(stderr, "La bateria de los motores esta descargada. Coche no arranca!\n");
-       ///terminate(SIGINT);
+       terminate(SIGINT);
    }    
 
    setupWiimote();
@@ -582,6 +624,24 @@ void main(int argc, char *argv[])
 {
    int r;
    
+   opterr = 0;
+   while ((r = getopt(argc, argv, "rbf:")) != -1)
+       switch (r) {
+           case 'r':  /* Remote only mode: does not measure distance */
+               remoteOnly = 1;
+               break;
+           case 'b':  /* Does not check battery */
+               checkBattery = 0;
+               break;               
+           case 'f': /* Set sound file to be played with UP arrow */
+               alarmFile = optarg;
+               break;
+           default:
+               fprintf(stderr, "Uso: %s [-r] [-b] [-f <fichero de alarma>]\n", argv[0]);
+               exit(1);
+     }
+   
+   
    r = setup();
    if (r) {
        fprintf(stderr, "Error al inicializar. Coche no arranca!\n");
@@ -596,15 +656,15 @@ void main(int argc, char *argv[])
    }
    
    for (;;) { 
-          esquivando = 0;  // señala que ya se puede volver a enviar la señal de obstáculo encontrado
+       esquivando = 0;  // señala que ya se puede volver a enviar la señal de obstáculo encontrado
        r = sem_wait(&semaphore);   // bloquea hasta que encontremos un obstáculo
        if (r) {
             perror("Error al esperar al semaforo");
        }
-       
+       continue;
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;
        while (distancia < DISTMIN) {
-            //printf("Distancia: %d cm\n", distancia); 
+            printf("Distancia: %d cm\n", distancia); 
             stopMotor(&m_izdo);
             stopMotor(&m_dcho);
             pito(2, 0);  // pita 2 décimas en otro hilo (vuelve inmediatamente)

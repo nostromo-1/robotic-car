@@ -12,6 +12,7 @@ Reproduce un fichero de audio en formato WAV
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 #include <sys/mman.h>
 #include <pthread.h>
 
@@ -78,7 +79,7 @@ void* play_wav(void *filename)
     pthread_cleanup_push(cleanup_outer, NULL);
     fd = open(filename, O_RDONLY);
     if (fd == -1) {
-        fprintf(stderr, "Error en fichero %s\n", filename);    
+        fprintf(stderr, "Error en fichero %s: %s\n", filename, strerror(errno));    
         pthread_exit(NULL);
     }
     /* Mapea sección inicial de 12 bytes */
