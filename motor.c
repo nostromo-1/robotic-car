@@ -16,6 +16,7 @@ Realiza el control principal del coche
 #include <semaphore.h>
 #include <malloc.h>
 #include <string.h>
+#include <stdbool.h>
   
 #include <pigpio.h>
 #include <cwiid.h>
@@ -33,7 +34,8 @@ extern int optind, opterr, optopt;
 
 #define SONAR_TRIGGER 23
 #define SONAR_ECHO    24
-#define NUMPOS 2    /* Número de medidas de posición promediadas en distancia */
+#define NUMPOS 2     /* Número de medidas de posición promediadas en distancia */
+#define NUMHOLES 21  /* Número de agujeros en discos de encoder del motor */
 
 #define PITO_PIN 26
 #define VBAT_PIN 19
@@ -55,13 +57,14 @@ void wmScan(int gpio, int level, uint32_t tick);
  
 /****************** Variables y tipos globales **************************/
 
-typedef enum {ADELANTE=0, ATRAS=1} Sentido_t;
+typedef enum {ADELANTE, ATRAS} Sentido_t;
 typedef struct {
-    const uint en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
+    const unsigned int en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
     Sentido_t sentido;   /* ADELANTE, ATRAS */
-    int velocidad;       /* -100 a 100 */
-    uint32_t t_on;
-    volatile int freq;
+    int velocidad;       /* 0 a 100, velocidad (no real) impuesta al motor */
+    int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100 */
+    volatile uint32_t counter, tick, rpm;
+    pthread_mutex_t mutex;
 } Motor_t;
 
 
@@ -72,25 +75,24 @@ typedef struct {
 
 
 typedef struct {
-    int pitando;
-    const uint pin;
+    bool pitando;
+    const unsigned int pin;
     pthread_mutex_t mutex;
 } Bocina_t;
 
 
 volatile uint32_t distancia = UINT32_MAX;
-volatile int velocidad = 50;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
+volatile int velocidadCoche = 50;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 volatile int powerState = PI_ON;
-volatile int esquivando;
+volatile bool esquivando;
 sem_t semaphore;
-int remoteOnly;
-int checkBattery = 1;
+bool remoteOnly, useEncoder, checkBattery, softTurn;
 char *alarmFile = "sounds\\police.wav";
 MandoWii_t mando;
 
 
 Bocina_t bocina = {
-    .pitando = 0,
+    .pitando = false,
     .pin = PITO_PIN,
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
@@ -100,7 +102,7 @@ Motor_t m_izdo = {
     .in1_pin = MI_IN1,
     .in2_pin = MI_IN2,
     .sensor_pin = LSENSOR_PIN,
-    .sentido = ADELANTE
+    .mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
 Motor_t m_dcho = {
@@ -108,14 +110,14 @@ Motor_t m_dcho = {
     .in1_pin = MD_IN1,
     .in2_pin = MD_IN2,
     .sensor_pin = RSENSOR_PIN,
-    .sentido = ADELANTE
+    .mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
 
 
 
 /****************** Funciones de control de los motores **************************/
-static void ajustaSentido(Motor_t *motor, Sentido_t dir)
+void ajustaSentido(Motor_t *motor, Sentido_t dir)
 {
     switch(dir) {
       case ADELANTE:
@@ -133,29 +135,46 @@ static void ajustaSentido(Motor_t *motor, Sentido_t dir)
 
 void stopMotor(Motor_t *motor)
 {
+    pthread_mutex_lock(&motor->mutex);
     gpioWrite(motor->in1_pin, PI_OFF);
     gpioWrite(motor->in2_pin, PI_OFF);
-    motor->velocidad = 0;
+    motor->PWMduty = motor->velocidad = 0;
+    gpioPWM(motor->en_pin, motor->PWMduty);
+    pthread_mutex_unlock(&motor->mutex);  
 }
 
 
-/* v va de -100 a 100 */
-void ajustaVelocidad(Motor_t *motor, int v)
+/* v va de 0 a 100 */
+void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
 {    
     if (v > 100) v = 100;
-    if (v < -100) v = -100;
-    if (motor->velocidad == v) return;
-    motor->velocidad = v;
-    if (v>0) {  // ADELANTE
-        ajustaSentido(motor, ADELANTE);
+    if (v < 0) {
+        fprintf(stderr, "Error en ajustaMotor: v<0!\n");
+        v = 0;
     }
-    else {  //ATRAS
-        ajustaSentido(motor, ATRAS);
-        v = -v;
-    }
-    gpioPWM(motor->en_pin, v);
+    if (motor->velocidad == v && motor->sentido == sentido) return;
+    
+    pthread_mutex_lock(&motor->mutex);
+    ajustaSentido(motor, sentido);
+    motor->PWMduty = motor->velocidad = v;
+    gpioPWM(motor->en_pin, motor->PWMduty);
+    pthread_mutex_unlock(&motor->mutex);   
 }
 
+
+
+/* Rota el coche a la derecha (dextrógiro, sentido>0) o a la izquierda (levógiro, sentido<0)*/
+void rota(Motor_t *izdo, Motor_t *dcho, int sentido)  
+{
+    if (sentido>0) {  // sentido horario
+       ajustaMotor(izdo, 100, ADELANTE);
+       ajustaMotor(dcho, 100, ATRAS);
+    }
+    else{
+       ajustaMotor(izdo, 100, ATRAS);
+       ajustaMotor(dcho, 100, ADELANTE);
+    }    
+}
 
 
 int setupMotor(Motor_t *motor)
@@ -165,12 +184,15 @@ int setupMotor(Motor_t *motor)
     r |= gpioSetMode(motor->in1_pin, PI_OUTPUT);
     r |= gpioSetMode(motor->in2_pin, PI_OUTPUT);
     
-    if (gpioSetPWMfrequency(motor->en_pin, 100)<0) r = -1;   /* 100 Hz */
-    if (gpioSetPWMrange(motor->en_pin, 100)<0) r = -1;       /* Máximo: 100%, real range = 2000 */
+    if (gpioSetPWMfrequency(motor->en_pin, 100)<0) r = -1;   /* 100 Hz, low but not audible */
+    if (gpioSetPWMrange(motor->en_pin, 100)<0) r = -1;       /* Range: 0-100, real range = 2000 */
     
-    r |= gpioSetMode(motor->sensor_pin, PI_INPUT);
-    gpioSetAlertFunc(motor->sensor_pin, speedSensor);
-    gpioGlitchFilter(motor->sensor_pin, 1000);      
+    if (useEncoder) {
+        r |= gpioSetMode(motor->sensor_pin, PI_INPUT);
+        gpioSetPullUpDown(motor->sensor_pin, PI_PUD_DOWN);
+        gpioSetAlertFunc(motor->sensor_pin, speedSensor);
+        gpioGlitchFilter(motor->sensor_pin, 1000);      
+    }
     
     if (r) fprintf(stderr, "Cannot initialise motor!\n");
     return r;
@@ -346,13 +368,16 @@ void wiiErr(cwiid_wiimote_t *wiimote, const char *s, va_list ap)
 /*** wiimote event loop ***/
 static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_mesg mesg[], struct timespec *t)
 {
-    int i, v_izdo, v_dcho;
+    int i, v_izdo, v_dcho, speedDelta;
+    Sentido_t s_izdo, s_dcho;
     static uint16_t previous_buttons;
     unsigned int bateria;
     static int LEDs[4] = { CWIID_LED1_ON,  CWIID_LED1_ON | CWIID_LED2_ON,
                 CWIID_LED1_ON | CWIID_LED2_ON | CWIID_LED3_ON,
                 CWIID_LED1_ON | CWIID_LED2_ON | CWIID_LED3_ON | CWIID_LED4_ON };        
 
+    if (softTurn) speedDelta = 0;
+    else speedDelta = 30;    
     for (i = 0; i < mesg_count; i++) {
         switch (mesg[i].type) {
         case CWIID_MESG_BTN:  // Change in buttons
@@ -360,39 +385,41 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
             
             /* ajusta la velocidad del coche y la marca en leds del mando */
             if (previous_buttons&CWIID_BTN_PLUS && ~mando.buttons&CWIID_BTN_PLUS) {
-                velocidad += 10;
-                if (velocidad > 100) velocidad = 100;
-                cwiid_set_led(wiimote, LEDs[velocidad/26]);
+                velocidadCoche += 10;
+                if (velocidadCoche > 100) velocidadCoche = 100;
+                cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
             }
             if (previous_buttons&CWIID_BTN_MINUS && ~mando.buttons&CWIID_BTN_MINUS) {
-                velocidad -= 10;
-                if (velocidad < 0) velocidad = 0;
-                cwiid_set_led(wiimote, LEDs[velocidad/26]);
+                velocidadCoche -= 10;
+                if (velocidadCoche < 0) velocidadCoche = 0;
+                cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
             }
             
-            /*** Botones A y B, leen la variable global "velocidad" ***/
+            /*** Botones A y B, leen la variable global "velocidadCoche" ***/
             if (mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
-                if (mando.buttons&CWIID_BTN_A) v_izdo=v_dcho=velocidad;
-                else v_izdo=v_dcho=-velocidad;  // si vamos marcha atrás, invierte velocidad
+                v_izdo = v_dcho = velocidadCoche;
+                if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
+                else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrás (botón B), invierte sentido
 
                 /*** Botones LEFT y RIGHT, giran el coche ***/
                 if (mando.buttons&CWIID_BTN_RIGHT) {
                     v_dcho = 0;
-                    v_izdo = velocidad+30;
-                    if (~mando.buttons&CWIID_BTN_A) v_izdo = - v_izdo;  // si vamos marcha atrás, invierte velocidad
+                    v_izdo = velocidadCoche+speedDelta;
                 } 
             
                 if (mando.buttons&CWIID_BTN_LEFT) {
                     v_izdo = 0;
-                    v_dcho = velocidad+30;
-                    if (~mando.buttons&CWIID_BTN_A) v_dcho = - v_dcho;  // si vamos marcha atrás, invierte velocidad
+                    v_dcho = velocidadCoche+speedDelta;                
                 }
             }
-            else v_izdo = v_dcho = 0;
+            else {  // Ni A ni B pulsados
+                v_izdo = v_dcho = 0;
+                s_izdo = s_dcho = ADELANTE;
+            }
                     
-            /*** Ahora, activa la velocidad calculada en cada motor ***/
-            ajustaVelocidad(&m_izdo, v_izdo);
-            ajustaVelocidad(&m_dcho, v_dcho);
+            /*** Ahora, activa la velocidadCoche calculada en cada motor ***/
+            ajustaMotor(&m_izdo, v_izdo, s_izdo);
+            ajustaMotor(&m_dcho, v_dcho, s_dcho);
         
     
             /*** pito ***/
@@ -412,7 +439,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
         case CWIID_MESG_STATUS:
             bateria = (100*mesg[i].status_mesg.battery)/CWIID_BATTERY_MAX;
             printf("Bateria del wiimote: %u\%\n", bateria);
-            cwiid_set_led(wiimote, LEDs[velocidad/26]);
+            cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
             break;
             
         default:
@@ -463,13 +490,14 @@ static int button;
         case PI_ON:   // Sync button released
             if (button != 1) return;   // elimina clicks espureos
             button = 0;
-            ajustaVelocidad(&m_izdo, 0);  // Para el coche mientras escanea wiimotes
-            ajustaVelocidad(&m_dcho, 0);
-            velocidad = 50;  // Nueva velocidad inicial, con o sin mando
-            setupWiimote();    
+            velocidadCoche = 0;
+            ajustaMotor(&m_izdo, 0, ADELANTE);  // Para el coche mientras escanea wiimotes
+            ajustaMotor(&m_dcho, 0, ADELANTE);
+            setupWiimote();   
+            velocidadCoche = 50;   // Nueva velocidad inicial, con o sin mando            
             if (!mando.wiimote) {  // No hay mando, coche es autónomo
-                ajustaVelocidad(&m_izdo, velocidad);
-                ajustaVelocidad(&m_dcho, velocidad);                
+                ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
+                ajustaMotor(&m_dcho, velocidadCoche,ADELANTE);                
             }
             break;
         case PI_OFF:  // Sync button pressed
@@ -479,52 +507,113 @@ static int button;
 }
 
 
+
+/***************Funciones de control de la velocidad ********************/
 /* callback llamado cuando el pin LSENSOR_PIN o RSENSOR_PIN cambia de estado
 Se usa para medir la velocidad de rotación de las ruedas */
 void speedSensor(int gpio, int level, uint32_t tick)
 {
-uint32_t period;
 Motor_t *motor;
 
     switch (gpio) {
-        case LSENSOR_PIN: motor = &m_izdo; break;
-        case RSENSOR_PIN: motor = &m_dcho; break; 
+        case LSENSOR_PIN: 
+            motor = &m_izdo; 
+            printf("Left\n"); 
+            break;
+        case RSENSOR_PIN: 
+            motor = &m_dcho; 
+            printf("Right\n"); 
+            break;  
     }
 
     switch (level) {
-        case PI_ON:   
-            period = tick - motor->t_on;
-            motor->freq = 1000000/period;
-            printf("gpio %d: f=%u, rpm=%u\n", gpio, motor->freq, motor->freq*60/21);
-            
-            motor->t_on = tick;
+        case PI_ON:
+            motor->counter++;
+            motor->tick = tick;
             break;
-        case PI_OFF:  
+        case PI_OFF:
+            motor->counter++;
+            motor->tick = tick;        
             break;
     }    
+}
+
+
+/* Callback llamado regularmente. Realiza el lazo de control de la velocidad, comparando
+la diferencia de velocidades entre los motores para igualarlas */
+void speedControl(void)
+{
+static uint32_t past_lcounter, past_ltick;    
+uint32_t current_lcounter =  m_izdo.counter, current_ltick = m_izdo.tick;  
+uint32_t lpulses=0, lperiod, lfreq;
+
+static uint32_t past_rcounter, past_rtick;    
+uint32_t current_rcounter =  m_dcho.counter, current_rtick = m_dcho.tick;  
+uint32_t rpulses=0, rperiod, rfreq;
+  
+int pv, kp=10;  
+  
+    // Left motor
+    if (past_ltick == 0) goto l_end;  // Exceptionally, it seems a good use of goto
+    lperiod = current_ltick - past_ltick;
+    if (lperiod) {
+        lpulses = current_lcounter - past_lcounter;
+        lfreq = (1000000*lpulses)/lperiod;
+        m_izdo.rpm = lfreq*60/NUMHOLES/2;
+        //printf("Left motor: pulses=%u, f=%u, rpm=%u\n", lpulses, lfreq, m_izdo.rpm);
+    }
     
+    l_end:
+    if (past_ltick == 0 || lperiod == 0) {
+        //printf("Left motor stopped\n");
+        m_izdo.rpm = 0;
+    }
+    past_lcounter = current_lcounter;
+    past_ltick = current_ltick;
+    
+    // Right motor
+    if (past_rtick == 0) goto r_end;  // Exceptionally, it seems a good use of goto
+    rperiod = current_rtick - past_rtick;
+    if (rperiod) {
+        rpulses = current_rcounter - past_rcounter;
+        rfreq = (1000000*rpulses)/rperiod;
+        m_dcho.rpm = rfreq*60/NUMHOLES/2;
+        //printf("Right motor: pulses=%u, f=%u, rpm=%u\n", rpulses, rfreq, m_dcho.rpm);
+    }
+    
+    r_end:
+    if (past_rtick == 0 || rperiod == 0) {
+        //printf("Right motor stopped\n");
+        m_dcho.rpm = 0;    
+    }
+    past_rcounter = current_rcounter;
+    past_rtick = current_rtick;
+    
+    /******* P control loop. SP=0, PV=lpulses-rpulses *********/
+    return;
+    if (m_izdo.velocidad != m_dcho.velocidad) return;  // Enter control section if straight line: both speeds equal
+    if (m_izdo.velocidad == 0) return;  // If speed is 0 (in both), do not enter control section
+    pv = lpulses - rpulses;
+    if (pv<=1 && pv >=-1) return;  // Tolerable error, do not enter control section
+    //printf("\nPV: %i, old PWMduty:%i ", pv, m_izdo.PWMduty);
+    
+    pthread_mutex_lock(&m_izdo.mutex);
+    m_izdo.PWMduty -= (kp*pv)/10;
+    m_dcho.PWMduty += (kp*pv)/10;
+    //printf("New PWMduty: %i\n\n", m_izdo.PWMduty);
+    if (m_izdo.PWMduty>100) m_izdo.PWMduty = 100;
+    if (m_izdo.PWMduty<0) m_izdo.PWMduty = 0;
+    gpioPWM(m_izdo.en_pin, m_izdo.PWMduty);
+    if (m_dcho.PWMduty>100) m_dcho.PWMduty = 100;
+    if (m_dcho.PWMduty<0) m_dcho.PWMduty = 0;
+    gpioPWM(m_dcho.en_pin, m_dcho.PWMduty);   
+    pthread_mutex_unlock(&m_izdo.mutex);   
     
 }
+
 
 
 /****************** Funciones auxiliares varias **************************/
-
-
-/* Rota el coche a la derecha (dextrógiro, sentido>0) o a la izquierda (levógiro, sentido<0)*/
-void rota(Motor_t *izdo, Motor_t *dcho, int sentido)  
-{
-    if (sentido>0) {  // sentido horario
-       ajustaVelocidad(izdo, 100);
-       ajustaVelocidad(dcho, -100);
-    }
-    else{
-       ajustaVelocidad(izdo, -100);
-       ajustaVelocidad(dcho, 100);
-    }    
-}
-
-
-
 
 
 /* Comprueba si los motores tienen alimentación.
@@ -564,13 +653,13 @@ void getPowerState(void)
 /* Al recibir una señal, para el coche, cierra todo y termina el programa */
 void terminate(int signum)
 {
-   ajustaVelocidad(&m_izdo, 0);
-   ajustaVelocidad(&m_dcho, 0);
    stopMotor(&m_izdo);
    stopMotor(&m_dcho);
    if (mando.wiimote) cwiid_close(mando.wiimote);
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_OFF);
-   gpioSetPullUpDown(VBAT_PIN, PI_PUD_OFF);  
+   gpioSetPullUpDown(VBAT_PIN, PI_PUD_OFF); 
+   gpioSetPullUpDown(m_izdo.sensor_pin, PI_PUD_OFF);   
+   gpioSetPullUpDown(m_dcho.sensor_pin, PI_PUD_OFF); 
    gpioWrite(bocina.pin, PI_OFF);
    gpioSetMode(AUDR_PIN, PI_INPUT);
    gpioTerminate();
@@ -604,7 +693,7 @@ int setup(void)
    
    r |= setupMotor(&m_izdo);
    r |= setupMotor(&m_dcho);
-   
+    
    if (powerState == PI_OFF) {
        fprintf(stderr, "La bateria de los motores esta descargada. Coche no arranca!\n");
        terminate(SIGINT);
@@ -612,8 +701,8 @@ int setup(void)
 
    setupWiimote();
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
-
-   r |= setupSonar();
+   if (useEncoder) gpioSetTimerFunc(2, 400, speedControl);  // Control velocidad motores, cada 400 ms, timer#2
+   if (!remoteOnly) r |= setupSonar();
    r |= sem_init(&semaphore, 0, 0);
    return r;
 }
@@ -625,19 +714,25 @@ void main(int argc, char *argv[])
    int r;
    
    opterr = 0;
-   while ((r = getopt(argc, argv, "rbf:")) != -1)
+   while ((r = getopt(argc, argv, "rbesf:")) != -1)
        switch (r) {
            case 'r':  /* Remote only mode: does not measure distance */
-               remoteOnly = 1;
+               remoteOnly = true;
                break;
-           case 'b':  /* Does not check battery */
-               checkBattery = 0;
-               break;               
+           case 'b':  /* Check battery */
+               checkBattery = true;
+               break;          
+           case 'e':  /* Use wheel encoders */
+               useEncoder = true;
+               break;    
+           case 's':  /* Soft turning (for 2WD) */
+               softTurn = true;
+               break;                 
            case 'f': /* Set sound file to be played with UP arrow */
                alarmFile = optarg;
                break;
            default:
-               fprintf(stderr, "Uso: %s [-r] [-b] [-f <fichero de alarma>]\n", argv[0]);
+               fprintf(stderr, "Uso: %s [-r] [-b] [-e] [-s] [-f <fichero de alarma>]\n", argv[0]);
                exit(1);
      }
    
@@ -650,9 +745,9 @@ void main(int argc, char *argv[])
    }
     
    audioplay("sounds/ready.wav", 1);
-   if (mando.wiimote==NULL) {
-        ajustaVelocidad(&m_izdo, velocidad);
-        ajustaVelocidad(&m_dcho, velocidad);       
+   if (mando.wiimote==NULL) {  // No hay mando, el coche es autónomo
+        ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
+        ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);       
    }
    
    for (;;) { 
@@ -661,7 +756,8 @@ void main(int argc, char *argv[])
        if (r) {
             perror("Error al esperar al semaforo");
        }
-       continue;
+       if (remoteOnly) continue;
+       
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;
        while (distancia < DISTMIN) {
             printf("Distancia: %d cm\n", distancia); 
@@ -682,8 +778,8 @@ void main(int argc, char *argv[])
        }
        // Hemos esquivado el obstáculo, ahora velocidad normal si A está pulsada
        if (!mando.wiimote || mando.buttons&CWIID_BTN_A) {
-            ajustaVelocidad(&m_izdo, velocidad);
-            ajustaVelocidad(&m_dcho, velocidad);
+            ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
+            ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);
        }
    }
    
