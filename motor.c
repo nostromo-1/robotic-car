@@ -87,7 +87,7 @@ volatile int powerState = PI_ON;
 volatile bool esquivando;
 sem_t semaphore;
 bool remoteOnly, useEncoder, checkBattery, softTurn;
-char *alarmFile = "sounds\\police.wav";
+char *alarmFile = "sounds/police.wav";
 MandoWii_t mando;
 
 
@@ -403,12 +403,12 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
 
                 /*** Botones LEFT y RIGHT, giran el coche ***/
                 if (mando.buttons&CWIID_BTN_RIGHT) {
-                    v_dcho = 0;
+                    v_dcho = 50; s_dcho = 1 - s_dcho;
                     v_izdo = velocidadCoche+speedDelta;
                 } 
             
                 if (mando.buttons&CWIID_BTN_LEFT) {
-                    v_izdo = 0;
+                    v_izdo = 50; s_izdo = 1 - s_izdo;
                     v_dcho = velocidadCoche+speedDelta;                
                 }
             }
@@ -459,8 +459,8 @@ void setupWiimote(void)
     cwiid_set_err(wiiErr);
     mando.buttons = 0;
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
-    gpioSleep(PI_TIME_RELATIVE, 2, 0);  // para desconectar el mando si estaba conectado
     printf("Pulsa las teclas 1 y 2 en el mando de la Wii...\n");
+    gpioSleep(PI_TIME_RELATIVE, 2, 0);  // para desconectar el mando si estaba conectado
     ba = *BDADDR_ANY;
     wiimote = cwiid_open_timeout(&ba, 0, 5);
     if (!wiimote ||
