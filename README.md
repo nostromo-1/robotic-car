@@ -6,7 +6,7 @@ It is a 4WD or 2WD car, with a raspberry pi as MCU, and controlled by a wiimote.
 It adds some external electronics.
 Communication with the robot is achieved via bluetooth (the wiimote) and wifi (start/stop program, error and status messages).
 
-##Features
+## Features
 * 4WD or 2WD robotic car
 * It can operate under the control of a Wiimote or in autonomous mode
 * The Wiimote can be used to:
@@ -22,7 +22,7 @@ Communication with the robot is achieved via bluetooth (the wiimote) and wifi (s
 * If a pi-camera is attached, it can be used to display the image in a web browser (using https://github.com/silvanmelchior/RPi_Cam_Web_Interface)
 * Battery: 6 AA rechargeable NiMH for the motor and electronics, a 5V power bank for the raspberry pi. I prefer to use separate power supplies, though a single one could be used.
 
-##Parts
+## Parts
 The following parts are needed to build it:
 * Car chasis. For example, http://www.leantec.es/robotica/59-kit-robot-de-4-ruedas-con-ultrasonido.html
 * 4 motors (if 4WD) or 2 motors (if 2WD)
@@ -32,7 +32,7 @@ The following parts are needed to build it:
 * Transistors, capacitors, resistors, push button and LED for voltage checker and scan button. A 6V buzzer. The schematics can be seen in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche.pdf
 * For the audio amplifier: a LM386 integrated circuit, an 8 ohm small speaker and some resistors and capacitors. The schematics are in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche%20ampli.pdf. The audio signal is taken from the GPIO, it does not use the audio output jack, so it also works on a Raspberry Pi Zero.
 
-##Software
+## Software
 The robot runs on raspbian, I have tested it on the releases from mid 2016. It is programmed in C. It makes use of the [pigpio library] (http://abyz.co.uk/rpi/pigpio/) for GPIO access. It also needs the bluetooth and alsa libraries.
 The program avoids active loops in order to make a light use of CPU. Its CPU usage is about 7% (which is due to pigpio). It makes use of event loops and semaphores in order to avoid active loops.
 
