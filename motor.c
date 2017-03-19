@@ -85,6 +85,7 @@ volatile uint32_t distancia = UINT32_MAX;
 volatile int velocidadCoche = 50;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 volatile int powerState = PI_ON;
 volatile bool esquivando;
+
 sem_t semaphore;
 bool remoteOnly, useEncoder, checkBattery, softTurn;
 char *alarmFile = "sounds/police.wav";
@@ -228,7 +229,7 @@ void sonarEcho(int gpio, int level, uint32_t tick)
  case PI_OFF: 
            endTick = tick;
            diffTick = endTick - startTick;
-           if (diffTick > 30000 || diffTick < 50) break;  /* out of range */
+           //if (diffTick > 30000 || diffTick < 50) break;  /* out of range */
            d = (diffTick*17)/1000;
 
            distance_array[pos_array++] = d;
@@ -246,9 +247,10 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            /* Calculate moving average */
            for (i=0, suma=0; i<NUMPOS; i++) suma += distance_array[i]; 
            distancia = suma/NUMPOS;   /* La variable de salida, global */
-           if (!remoteOnly && distancia < DISTMIN && esquivando == 0) {
-                esquivando = 1;
-                i = sem_post(&semaphore);
+           //printf("Distancia: %u\n", distancia);
+           if (!remoteOnly && distancia < DISTMIN && !esquivando) {
+                esquivando = true;
+                i = sem_post(&semaphore);  // indica a main que hay un obstáculo delante
                 if (i) perror("Error al activar semáforo");
            }
            break;
@@ -368,7 +370,7 @@ void wiiErr(cwiid_wiimote_t *wiimote, const char *s, va_list ap)
 /*** wiimote event loop ***/
 static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_mesg mesg[], struct timespec *t)
 {
-    int i, v_izdo, v_dcho, speedDelta;
+    int i, v_izdo, v_dcho;
     Sentido_t s_izdo, s_dcho;
     static uint16_t previous_buttons;
     unsigned int bateria;
@@ -376,9 +378,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                 CWIID_LED1_ON | CWIID_LED2_ON | CWIID_LED3_ON,
                 CWIID_LED1_ON | CWIID_LED2_ON | CWIID_LED3_ON | CWIID_LED4_ON };        
 
-    if (softTurn) speedDelta = 0;
-    else speedDelta = 30;    
-    for (i = 0; i < mesg_count; i++) {
+     for (i = 0; i < mesg_count; i++) {
         switch (mesg[i].type) {
         case CWIID_MESG_BTN:  // Change in buttons
             mando.buttons = mesg[i].btn_mesg.buttons;
@@ -403,13 +403,15 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
 
                 /*** Botones LEFT y RIGHT, giran el coche ***/
                 if (mando.buttons&CWIID_BTN_RIGHT) {
-                    v_dcho = 50; s_dcho = 1 - s_dcho;
-                    v_izdo = velocidadCoche+speedDelta;
+                    if (softTurn) v_dcho = 0; s_dcho = 1 - s_dcho;
+                    //v_dcho = softTurn?0:50; s_dcho = 1 - s_dcho;
+                    v_izdo += softTurn?0:30;
                 } 
             
                 if (mando.buttons&CWIID_BTN_LEFT) {
-                    v_izdo = 50; s_izdo = 1 - s_izdo;
-                    v_dcho = velocidadCoche+speedDelta;                
+                    if (softTurn) v_izdo = 0; s_izdo = 1 - s_izdo;
+                    //v_izdo = softTurn?0:50; s_izdo = 1 - s_izdo;
+                    v_dcho += softTurn?0:30;                
                 }
             }
             else {  // Ni A ni B pulsados
@@ -417,7 +419,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                 s_izdo = s_dcho = ADELANTE;
             }
                     
-            /*** Ahora, activa la velocidadCoche calculada en cada motor ***/
+            /*** Ahora activa la velocidadCoche calculada en cada motor ***/
             ajustaMotor(&m_izdo, v_izdo, s_izdo);
             ajustaMotor(&m_dcho, v_dcho, s_dcho);
         
@@ -590,8 +592,7 @@ int pv, kp=10;
     past_rtick = current_rtick;
     
     /******* P control loop. SP=0, PV=lpulses-rpulses *********/
-    return;
-    if (m_izdo.velocidad != m_dcho.velocidad) return;  // Enter control section if straight line: both speeds equal
+    if (m_izdo.velocidad != m_dcho.velocidad) return;  // Enter control section if straight line desired: both speeds equal
     if (m_izdo.velocidad == 0) return;  // If speed is 0 (in both), do not enter control section
     pv = lpulses - rpulses;
     if (pv<=1 && pv >=-1) return;  // Tolerable error, do not enter control section
@@ -603,12 +604,11 @@ int pv, kp=10;
     //printf("New PWMduty: %i\n\n", m_izdo.PWMduty);
     if (m_izdo.PWMduty>100) m_izdo.PWMduty = 100;
     if (m_izdo.PWMduty<0) m_izdo.PWMduty = 0;
-    gpioPWM(m_izdo.en_pin, m_izdo.PWMduty);
     if (m_dcho.PWMduty>100) m_dcho.PWMduty = 100;
     if (m_dcho.PWMduty<0) m_dcho.PWMduty = 0;
+    gpioPWM(m_izdo.en_pin, m_izdo.PWMduty);
     gpioPWM(m_dcho.en_pin, m_dcho.PWMduty);   
     pthread_mutex_unlock(&m_izdo.mutex);   
-    
 }
 
 
@@ -713,7 +713,7 @@ void main(int argc, char *argv[])
 {
    int r;
    
-   opterr = 0;
+   opterr = 0;  // Prevent getopt from outputting error messages
    while ((r = getopt(argc, argv, "rbesf:")) != -1)
        switch (r) {
            case 'r':  /* Remote only mode: does not measure distance */
@@ -751,22 +751,22 @@ void main(int argc, char *argv[])
    }
    
    for (;;) { 
-       esquivando = 0;  // señala que ya se puede volver a enviar la señal de obstáculo encontrado
+       esquivando = false;  // señala a sonarEcho que ya se puede volver a enviar la señal de obstáculo encontrado
        r = sem_wait(&semaphore);   // bloquea hasta que encontremos un obstáculo
        if (r) {
             perror("Error al esperar al semaforo");
        }
-       if (remoteOnly) continue;
-       
+       if (remoteOnly) continue;      
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;
+       
        while (distancia < DISTMIN) {
-            printf("Distancia: %d cm\n", distancia); 
+            //printf("Distancia: %d cm\n", distancia); 
             stopMotor(&m_izdo);
             stopMotor(&m_dcho);
-            pito(2, 0);  // pita 2 décimas en otro hilo (vuelve inmediatamente)
+            //pito(2, 0);  // pita 2 décimas en otro hilo (vuelve inmediatamente)
             gpioSleep(PI_TIME_RELATIVE, 1, 0);
        
-            // No esquiva si damos marcha atrás o si ya no pulsamos A
+            // No esquiva si ya no pulsamos A
             if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) break;
 
             // Gira un poco el coche para esquivar el obstáculo
