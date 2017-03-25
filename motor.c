@@ -11,6 +11,7 @@ Realiza el control principal del coche
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <signal.h>
 #include <pthread.h>
 #include <semaphore.h>
@@ -49,7 +50,7 @@ extern int optind, opterr, optopt;
 
 
 void* play_wav(void *filename);  // Función en fichero sound.c
-volatile int playing_audio, cancel_audio;  // Variables compartidas con fichero sound.c
+volatile bool playing_audio, cancel_audio;  // Variables compartidas con fichero sound.c
 
 void speedSensor(int gpio, int level, uint32_t tick);
 void wmScan(int gpio, int level, uint32_t tick);
@@ -264,8 +265,8 @@ int setupSonar(void)
    gpioWrite(SONAR_TRIGGER, PI_OFF);
    gpioSetMode(SONAR_ECHO, PI_INPUT);
 
-   /* update sonar 20 times a second, timer #0 */
-   if (gpioSetTimerFunc(0, 50, sonarTrigger) ||     /* every 50ms */
+   /* update sonar several times a second, timer #0 */
+   if (gpioSetTimerFunc(0, 60, sonarTrigger) ||     /* every 60ms */
         gpioSetAlertFunc(SONAR_ECHO, sonarEcho)) {  /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
         return -1;
@@ -347,7 +348,7 @@ void audioplay(char *file, int modo)
     
     /* Si ya estamos reproduciendo algo, manda señal de cancelación al thread de audio */
     if (playing_audio) {
-        cancel_audio = 1;
+        cancel_audio = true;
         return;
     }
     if (pthread_create(&pth, NULL, play_wav, file)) return;
@@ -475,9 +476,8 @@ void setupWiimote(void)
     } 
     mando.wiimote = wiimote;
     printf("Conectado al mando de la Wii\n");
-    pito(2, 1);  // Pita 2 décimas para avisar de que ha concluido con éxito la búsqueda de mando
     cwiid_set_rumble(wiimote, 1);  // señala mediante zumbido el mando sincronizado
-    gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos para separar zumbido y resto operaciones
+    gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos
     cwiid_set_rumble(wiimote, 0);
     return;
 }
@@ -487,23 +487,32 @@ void setupWiimote(void)
 void wmScan(int gpio, int level, uint32_t tick)
 {
 static int button;
+static uint32_t time;
     
     switch (level) {
         case PI_ON:   // Sync button released
             if (button != 1) return;   // elimina clicks espureos
             button = 0;
-            velocidadCoche = 0;
+            /* First, check for shutdown command: long press */
+            if (time-tick > 2*1000000) {
+                pito(10, 1);
+                execlp("halt", "halt", NULL);
+                return; // should never return
+            }
+            
+            /* Short press: scan wiimotes */
             ajustaMotor(&m_izdo, 0, ADELANTE);  // Para el coche mientras escanea wiimotes
             ajustaMotor(&m_dcho, 0, ADELANTE);
+            velocidadCoche = 50;   // Nueva velocidad inicial, con o sin mando  
             setupWiimote();   
-            velocidadCoche = 50;   // Nueva velocidad inicial, con o sin mando            
-            if (!mando.wiimote) {  // No hay mando, coche es autónomo
+            if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
                 ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
-                ajustaMotor(&m_dcho, velocidadCoche,ADELANTE);                
+                ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
             }
             break;
         case PI_OFF:  // Sync button pressed
             button = 1;
+            time = tick;
             break;
     }
 }
@@ -520,11 +529,9 @@ Motor_t *motor;
     switch (gpio) {
         case LSENSOR_PIN: 
             motor = &m_izdo; 
-            printf("Left\n"); 
             break;
         case RSENSOR_PIN: 
             motor = &m_dcho; 
-            printf("Right\n"); 
             break;  
     }
 
@@ -535,7 +542,7 @@ Motor_t *motor;
             break;
         case PI_OFF:
             motor->counter++;
-            motor->tick = tick;        
+            motor->tick = tick;          
             break;
     }    
 }
@@ -553,7 +560,7 @@ static uint32_t past_rcounter, past_rtick;
 uint32_t current_rcounter =  m_dcho.counter, current_rtick = m_dcho.tick;  
 uint32_t rpulses=0, rperiod, rfreq;
   
-int pv, kp=10;  
+int pv, kp=5;  
   
     // Left motor
     if (past_ltick == 0) goto l_end;  // Exceptionally, it seems a good use of goto
@@ -562,7 +569,7 @@ int pv, kp=10;
         lpulses = current_lcounter - past_lcounter;
         lfreq = (1000000*lpulses)/lperiod;
         m_izdo.rpm = lfreq*60/NUMHOLES/2;
-        //printf("Left motor: pulses=%u, f=%u, rpm=%u\n", lpulses, lfreq, m_izdo.rpm);
+        printf("Left motor: pulses=%u, rpm=%u\n", lpulses, m_izdo.rpm);
     }
     
     l_end:
@@ -580,7 +587,7 @@ int pv, kp=10;
         rpulses = current_rcounter - past_rcounter;
         rfreq = (1000000*rpulses)/rperiod;
         m_dcho.rpm = rfreq*60/NUMHOLES/2;
-        //printf("Right motor: pulses=%u, f=%u, rpm=%u\n", rpulses, rfreq, m_dcho.rpm);
+        printf("Right motor: pulses=%u, rpm=%u\n", rpulses, m_dcho.rpm);
     }
     
     r_end:
@@ -592,23 +599,25 @@ int pv, kp=10;
     past_rtick = current_rtick;
     
     /******* P control loop. SP=0, PV=lpulses-rpulses *********/
+    if (m_izdo.velocidad>0 && m_izdo.rpm==0) printf("Left motor stalled\n");
+    if (m_dcho.velocidad>0 && m_dcho.rpm==0) printf("Right motor stalled\n");   
     if (m_izdo.velocidad != m_dcho.velocidad) return;  // Enter control section if straight line desired: both speeds equal
     if (m_izdo.velocidad == 0) return;  // If speed is 0 (in both), do not enter control section
     pv = lpulses - rpulses;
     if (pv<=1 && pv >=-1) return;  // Tolerable error, do not enter control section
-    //printf("\nPV: %i, old PWMduty:%i ", pv, m_izdo.PWMduty);
     
     pthread_mutex_lock(&m_izdo.mutex);
+    pthread_mutex_lock(&m_dcho.mutex);   
     m_izdo.PWMduty -= (kp*pv)/10;
     m_dcho.PWMduty += (kp*pv)/10;
-    //printf("New PWMduty: %i\n\n", m_izdo.PWMduty);
     if (m_izdo.PWMduty>100) m_izdo.PWMduty = 100;
     if (m_izdo.PWMduty<0) m_izdo.PWMduty = 0;
     if (m_dcho.PWMduty>100) m_dcho.PWMduty = 100;
     if (m_dcho.PWMduty<0) m_dcho.PWMduty = 0;
     gpioPWM(m_izdo.en_pin, m_izdo.PWMduty);
     gpioPWM(m_dcho.en_pin, m_dcho.PWMduty);   
-    pthread_mutex_unlock(&m_izdo.mutex);   
+    pthread_mutex_unlock(&m_izdo.mutex); 
+    pthread_mutex_unlock(&m_dcho.mutex);
 }
 
 
@@ -683,7 +692,7 @@ int setup(void)
    
    if (checkBattery) { 
     gpioSetMode(VBAT_PIN, PI_INPUT);
-    gpioSetPullUpDown(VBAT_PIN, PI_PUD_DOWN);  // pull-down resistor; avoids floating pin if circuit not connected  
+    gpioSetPullUpDown(VBAT_PIN, PI_PUD_DOWN);   // pull-down resistor; avoids floating pin if circuit not connected  
     gpioSetTimerFunc(1, 15000, getPowerState);  // Comprueba tensión motores cada 15 seg, timer#1
     getPowerState();    
    }
@@ -701,7 +710,7 @@ int setup(void)
 
    setupWiimote();
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
-   if (useEncoder) gpioSetTimerFunc(2, 400, speedControl);  // Control velocidad motores, cada 400 ms, timer#2
+   if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
    if (!remoteOnly) r |= setupSonar();
    r |= sem_init(&semaphore, 0, 0);
    return r;
