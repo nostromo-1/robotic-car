@@ -15,15 +15,19 @@ Reproduce un fichero de audio en formato WAV
 #include <errno.h>
 #include <sys/mman.h>
 #include <pthread.h>
+#include <stdbool.h>
 
+#include <pigpio.h>
 #include <alsa/asoundlib.h>
 
 #define PCM_DEVICE "default"
+#define MIXER_DEVICE "PCM"
 #define NUMBER32(p) (*(p) + (*((p)+1)<<8) + (*((p)+2)<<16) + (*((p)+3)<<24))
 #define NUMBER16(p) (*(p) + (*((p)+1)<<8))
 
 
-extern volatile int playing_audio, cancel_audio;
+extern volatile bool playing_audio, cancel_audio;
+static int ampliPIN;
 
 
 struct data {
@@ -36,8 +40,8 @@ struct data {
 
 static void cleanup_outer(void *p)
 {
-    playing_audio = 0;
-    cancel_audio = 0;
+    playing_audio = false;
+    cancel_audio = false;
 }
 
 
@@ -52,8 +56,58 @@ static void cleanup_inner(void *p)
 
     munmap(arg->mem, arg->filelen);
     free(p);
+    gpioWrite(ampliPIN, PI_OFF);  // shutdown amplifier
 }
 
+
+
+/* Set volume; 0-100% */
+void setVolume(int volume)
+{
+    static long min, max;
+    static snd_mixer_t *handle;
+    static snd_mixer_selem_id_t *sid;
+    static snd_mixer_elem_t* elem;
+    int rc;
+
+    if (volume > 100) volume = 100;
+    if (volume < 0) volume = 0;
+    if (!elem) {
+        rc = snd_mixer_open(&handle, 0);
+        if (rc < 0) {
+            fprintf(stderr, "Error al abrir mixer de audio: %s\n", snd_strerror(rc));    
+            return;
+        }
+        snd_mixer_attach(handle, PCM_DEVICE);
+        snd_mixer_selem_register(handle, NULL, NULL);
+        rc = snd_mixer_load(handle);
+        if (rc < 0) {
+            fprintf(stderr, "Error al abrir mixer de audio: %s\n", snd_strerror(rc));    
+            return;
+        }
+        snd_mixer_selem_id_alloca(&sid);
+        snd_mixer_selem_id_set_index(sid, 0);
+        snd_mixer_selem_id_set_name(sid, MIXER_DEVICE);
+        elem = snd_mixer_find_selem(handle, sid);
+        if (!elem) return;
+        rc = snd_mixer_selem_get_playback_volume_range(elem, &min, &max);
+        if (rc < 0) {
+            fprintf(stderr, "Error al leer volumen de audio: %s\n", snd_strerror(rc));   
+            elem = NULL;            
+            return;
+        }        
+    }
+    if (elem) snd_mixer_selem_set_playback_volume_all(elem, min + volume*(max-min)/100);
+}
+
+
+
+void setupSound(int gpio)
+{
+    ampliPIN = gpio;
+    gpioSetMode(ampliPIN, PI_OUTPUT);
+    gpioWrite(ampliPIN, PI_OFF);     // shutdown amplifier
+}
 
 
 
@@ -75,7 +129,7 @@ void* play_wav(void *filename)
     unsigned int channels, rate, bitsPerSample, periodSize, frameSize;
  
  
-    playing_audio = 1;
+    playing_audio = true;
     pthread_cleanup_push(cleanup_outer, NULL);
     fd = open(filename, O_RDONLY);
     if (fd == -1) {
@@ -203,6 +257,8 @@ void* play_wav(void *filename)
     frameSize = channels * bitsPerSample/8;
     periodSize = frames * frameSize;
 
+    gpioWrite(ampliPIN, PI_ON);   // Activate amplifier
+    gpioSleep(PI_TIME_RELATIVE, 0, 100000);  // Wait for ampli to stabilize
     /* Bucle enviando datos de audio */
     while (rest = mem + filelen - p, rest>0) {
         if (cancel_audio) break;

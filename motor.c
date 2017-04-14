@@ -43,6 +43,7 @@ extern int optind, opterr, optopt;
 #define WMSCAN_PIN 12
 #define AUDR_PIN 18
 #define AUDR_ALT PI_ALT5   /* ALT function for audio pin, ALT5 for pin 18 */
+#define AMPLI_PIN 13
 #define LSENSOR_PIN 5
 #define RSENSOR_PIN 6
 
@@ -50,6 +51,8 @@ extern int optind, opterr, optopt;
 
 
 void* play_wav(void *filename);  // Función en fichero sound.c
+void setupSound(int gpio);
+void setVolume(unsigned int volume);
 volatile bool playing_audio, cancel_audio;  // Variables compartidas con fichero sound.c
 
 void speedSensor(int gpio, int level, uint32_t tick);
@@ -89,6 +92,7 @@ volatile bool esquivando;
 
 sem_t semaphore;
 bool remoteOnly, useEncoder, checkBattery, softTurn;
+int soundVolume = 96;  // 0 - 100%
 char *alarmFile = "sounds/police.wav";
 MandoWii_t mando;
 
@@ -169,12 +173,12 @@ void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
 void rota(Motor_t *izdo, Motor_t *dcho, int sentido)  
 {
     if (sentido>0) {  // sentido horario
-       ajustaMotor(izdo, 100, ADELANTE);
-       ajustaMotor(dcho, 100, ATRAS);
+       ajustaMotor(izdo, softTurn?50:100, ADELANTE);
+       ajustaMotor(dcho, softTurn?0:100, ATRAS);
     }
     else{
-       ajustaMotor(izdo, 100, ATRAS);
-       ajustaMotor(dcho, 100, ADELANTE);
+       ajustaMotor(dcho, softTurn?50:100, ADELANTE);
+       ajustaMotor(izdo, softTurn?0:100, ATRAS);
     }    
 }
 
@@ -208,12 +212,12 @@ int setupMotor(Motor_t *motor)
 void sonarTrigger(void)
 {
    gpioWrite(SONAR_TRIGGER, PI_ON);
-   gpioDelay(10); /* 10us trigger pulse */
+   gpioDelay(10);     /* 10us trigger pulse */
    gpioWrite(SONAR_TRIGGER, PI_OFF);
 }
 
 
-/* callback llamado cuando el pin SONAR_ECHO cambia de estado. Ajusta la variable global distancia */
+/* callback llamado cuando el pin SONAR_ECHO cambia de estado. Ajusta la variable global 'distancia' */
 void sonarEcho(int gpio, int level, uint32_t tick)
 {
    static uint32_t startTick, endTick;
@@ -383,17 +387,30 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
         switch (mesg[i].type) {
         case CWIID_MESG_BTN:  // Change in buttons
             mando.buttons = mesg[i].btn_mesg.buttons;
-            
-            /* ajusta la velocidad del coche y la marca en leds del mando */
+                       
             if (previous_buttons&CWIID_BTN_PLUS && ~mando.buttons&CWIID_BTN_PLUS) {
-                velocidadCoche += 10;
-                if (velocidadCoche > 100) velocidadCoche = 100;
-                cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
+                if (mando.buttons&CWIID_BTN_1) { /* sube volumen: buttons ´1´ + ´+´ */
+                    soundVolume += 2;
+                    if (soundVolume > 100) soundVolume = 100;
+                    setVolume(soundVolume);
+                }
+                else {  /* ajusta la velocidad del coche y la marca en leds del mando */
+                    velocidadCoche += 10;
+                    if (velocidadCoche > 100) velocidadCoche = 100;
+                    cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
+                }
             }
             if (previous_buttons&CWIID_BTN_MINUS && ~mando.buttons&CWIID_BTN_MINUS) {
-                velocidadCoche -= 10;
-                if (velocidadCoche < 0) velocidadCoche = 0;
-                cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
+                 if (mando.buttons&CWIID_BTN_1) { /* baja volumen: buttons ´1´ + ´-´ */
+                    soundVolume -= 2;
+                    if (soundVolume < 0) soundVolume = 0;
+                    setVolume(soundVolume);
+                } 
+                else {
+                    velocidadCoche -= 10;
+                    if (velocidadCoche < 0) velocidadCoche = 0;
+                    cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
+                }
             }
             
             /*** Botones A y B, leen la variable global "velocidadCoche" ***/
@@ -404,14 +421,14 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
 
                 /*** Botones LEFT y RIGHT, giran el coche ***/
                 if (mando.buttons&CWIID_BTN_RIGHT) {
-                    if (softTurn) v_dcho = 0; s_dcho = 1 - s_dcho;
-                    //v_dcho = softTurn?0:50; s_dcho = 1 - s_dcho;
+                    s_dcho = 1 - s_dcho;
+                    if (softTurn) v_dcho = 0; 
                     v_izdo += softTurn?0:30;
                 } 
             
                 if (mando.buttons&CWIID_BTN_LEFT) {
-                    if (softTurn) v_izdo = 0; s_izdo = 1 - s_izdo;
-                    //v_izdo = softTurn?0:50; s_izdo = 1 - s_izdo;
+                    s_izdo = 1 - s_izdo;
+                    if (softTurn) v_izdo = 0; 
                     v_dcho += softTurn?0:30;                
                 }
             }
@@ -486,14 +503,15 @@ void setupWiimote(void)
 /* callback llamado cuando el pin WMSCAN_PIN cambia de estado. Tiene un pull-up a VCC, OFF==pulsado */
 void wmScan(int gpio, int level, uint32_t tick)
 {
-static int button;
 static uint32_t time;
+static bool pressed;
     
     switch (level) {
         case PI_ON:   // Sync button released
-            if (button != 1) return;   // elimina clicks espureos
-            button = 0;
-            /* First, check for shutdown command: long press */
+            if (!pressed) return;   // elimina clicks espureos
+            pressed = false;
+            
+            /* Long press: shutdown */
             if (time-tick > 2*1000000) {
                 pito(10, 1);
                 execlp("halt", "halt", NULL);
@@ -511,7 +529,7 @@ static uint32_t time;
             }
             break;
         case PI_OFF:  // Sync button pressed
-            button = 1;
+            pressed = true;
             time = tick;
             break;
     }
@@ -560,7 +578,7 @@ static uint32_t past_rcounter, past_rtick;
 uint32_t current_rcounter =  m_dcho.counter, current_rtick = m_dcho.tick;  
 uint32_t rpulses=0, rperiod, rfreq;
   
-int pv, kp=5;  
+int pv, kp=15;  
   
     // Left motor
     if (past_ltick == 0) goto l_end;  // Exceptionally, it seems a good use of goto
@@ -606,6 +624,7 @@ int pv, kp=5;
     pv = lpulses - rpulses;
     if (pv<=1 && pv >=-1) return;  // Tolerable error, do not enter control section
     
+    printf("\tAdjust left: %i, right: %i\n", -(kp*pv)/10, (kp*pv)/10);
     pthread_mutex_lock(&m_izdo.mutex);
     pthread_mutex_lock(&m_dcho.mutex);   
     m_izdo.PWMduty -= (kp*pv)/10;
@@ -671,6 +690,7 @@ void terminate(int signum)
    gpioSetPullUpDown(m_dcho.sensor_pin, PI_PUD_OFF); 
    gpioWrite(bocina.pin, PI_OFF);
    gpioSetMode(AUDR_PIN, PI_INPUT);
+   gpioSetMode(AMPLI_PIN, PI_INPUT);
    gpioTerminate();
    exit(1);
 }
@@ -686,9 +706,11 @@ int setup(void)
    if (gpioInitialise()<0) return 1;
    if (gpioSetSignalFunc(SIGINT, terminate)<0) return 1;
     
+   setupSound(AMPLI_PIN);
+   setVolume(soundVolume);
+   gpioSetMode(AUDR_PIN, AUDR_ALT);  // Saca PWM0 (audio right) por el GPIO al amplificador
    gpioSetMode(bocina.pin, PI_OUTPUT);
    gpioWrite(bocina.pin, PI_OFF);
-   gpioSetMode(AUDR_PIN, AUDR_ALT);  // Saca PWM0 (audio right) por el GPIO al amplificador
    
    if (checkBattery) { 
     gpioSetMode(VBAT_PIN, PI_INPUT);
