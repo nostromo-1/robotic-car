@@ -14,7 +14,7 @@ Communication with the robot is achieved via bluetooth (the wiimote) and wifi (s
   * Turn right (RIGHT button) or left (LEFT button)
   * Increase ('+' button) or decrease speed ('-' button). Speed is signalled in the leds
   * Activate a buzzer sound (DOWN button)
-  * Play a police sound (UP button). If you push again the button while still playing, it stops playing
+  * Play a police sound (UP button) over a loudspeaker. If you push again the UP button while still playing, it stops playing
   * Increase (button ´1´ + button '+') or decrease (button '1' + button '-') volume of sound
 * It continuously monitors distance to an obstacle in the front side
 * If an obstacle is near, it will drive around it. It signals the obstacle by buzzing and stopping. It then turns until no obstacle is found.
