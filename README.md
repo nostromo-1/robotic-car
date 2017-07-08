@@ -18,9 +18,10 @@ Communication with the robot is achieved via bluetooth (the wiimote) and wifi (s
   * Increase (button ´1´ + button '+') or decrease (button '1' + button '-') volume of sound
 * It continuously monitors distance to an obstacle in the front side
 * If an obstacle is near, it will drive around it. It signals the obstacle by buzzing and stopping. It then turns until no obstacle is found.
-* It monitors battery voltage and shows low battery state by dimming a LED. If battery is low, it signals via GPIO, and buzzes as a warning
+* It monitors battery voltage and shows low battery state by turning off a LED. If battery is low, it also signals it via GPIO, and buzzes as a warning
 * If a button is pressed, it starts scanning for wiimotes and connects to one
 * If a pi-camera is attached, it can be used to display the image in a web browser (using https://github.com/silvanmelchior/RPi_Cam_Web_Interface)
+* It displays messages in a display
 * Battery: 6 AA rechargeable NiMH for the motor and electronics, a 5V power bank for the raspberry pi. I prefer to use separate power supplies, though a single one could be used.
 
 ## Parts
@@ -29,6 +30,7 @@ The following parts are needed to build it:
 * 4 motors (if 4WD) or 2 motors (if 2WD)
 * Motor controller: a L298N based circuit board, like http://www.leantec.es/motores-y-controladores/82-l298-controlador-de-motores-con-doble-puente-h.html
 * Distance sensor HC-SR04
+* Diaplay module SSD1306
 * A Raspberry pi. I use a Raspberry Pi 3 Model B, it has built-in bluetooth and wifi. You can also use a Raspberry Pi Zero with a USB hub (like https://shop.pimoroni.com/products/zero4u), a wifi dongle and a bluetooth dongle. Or the newly released Pi Zero W!
 * Transistors, capacitors, resistors, push button and LED for voltage checker and scan button. A 6V buzzer. The schematics can be seen in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche.pdf
 * For the audio amplifier: a LM386 integrated circuit, an 8 ohm small speaker and some resistors and capacitors. The schematics are in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche%20ampli.pdf. The audio signal is taken from the GPIO, it does not use the audio output jack, so it also works on a Raspberry Pi Zero.
