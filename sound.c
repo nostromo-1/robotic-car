@@ -67,11 +67,13 @@ void setVolume(int volume)
     static long min, max;
     static snd_mixer_t *handle;
     static snd_mixer_selem_id_t *sid;
-    static snd_mixer_elem_t* elem;
+    static snd_mixer_elem_t *elem;
     int rc;
 
     if (volume > 100) volume = 100;
     if (volume < 0) volume = 0;
+    
+    /* Inicializa datos en la primera llamada */
     if (!elem) {
         rc = snd_mixer_open(&handle, 0);
         if (rc < 0) {
@@ -97,6 +99,8 @@ void setVolume(int volume)
             return;
         }        
     }
+    
+    /* Si todo bien, ajusta volumen */
     if (elem) snd_mixer_selem_set_playback_volume_all(elem, min + volume*(max-min)/100);
 }
 

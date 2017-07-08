@@ -21,6 +21,7 @@ Realiza el control principal del coche
   
 #include <pigpio.h>
 #include <cwiid.h>
+#include "oled96.h"
 
 extern char *optarg;
 extern int optind, opterr, optopt;
@@ -43,12 +44,13 @@ extern int optind, opterr, optopt;
 #define WMSCAN_PIN 12
 #define AUDR_PIN 18
 #define AUDR_ALT PI_ALT5   /* ALT function for audio pin, ALT5 for pin 18 */
-#define AMPLI_PIN 13
+#define AMPLI_PIN 25
 #define LSENSOR_PIN 5
 #define RSENSOR_PIN 6
 
-#define DISTMIN 50  /* distancia a la que entendemos que hay un obstáculo */
+#define DISTMIN 50  /* distancia en cm a la que entendemos que hay un obstáculo */
 
+#define DISPLAY_I2C 0x3C  /* Puerto i2c del display SSD1306 */
 
 void* play_wav(void *filename);  // Función en fichero sound.c
 void setupSound(int gpio);
@@ -225,6 +227,7 @@ void sonarEcho(int gpio, int level, uint32_t tick)
    uint32_t diffTick, d;
    uint32_t i, suma;
    static int firstTime=0;
+   char str[17];
 
  switch (level) {
  case PI_ON: 
@@ -233,9 +236,9 @@ void sonarEcho(int gpio, int level, uint32_t tick)
 
  case PI_OFF: 
            endTick = tick;
-           diffTick = endTick - startTick;
-           //if (diffTick > 30000 || diffTick < 50) break;  /* out of range */
-           d = (diffTick*17)/1000;
+           diffTick = endTick - startTick;  // pulse length in microseconds
+           if (diffTick > 25000 || diffTick < 60) break;  /* out of range */
+           d = (diffTick*17)/1000;  // distance in cm
 
            distance_array[pos_array++] = d;
            if (pos_array == NUMPOS) pos_array = 0;
@@ -252,7 +255,9 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            /* Calculate moving average */
            for (i=0, suma=0; i<NUMPOS; i++) suma += distance_array[i]; 
            distancia = suma/NUMPOS;   /* La variable de salida, global */
-           //printf("Distancia: %u\n", distancia);
+           snprintf(str, sizeof(str), "Dist (cm): %-4u", distancia);
+           //printf("%s\n", str);
+           oledWriteString(0, 0, str, 0);
            if (!remoteOnly && distancia < DISTMIN && !esquivando) {
                 esquivando = true;
                 i = sem_post(&semaphore);  // indica a main que hay un obstáculo delante
@@ -587,7 +592,7 @@ int pv, kp=15;
         lpulses = current_lcounter - past_lcounter;
         lfreq = (1000000*lpulses)/lperiod;
         m_izdo.rpm = lfreq*60/NUMHOLES/2;
-        printf("Left motor: pulses=%u, rpm=%u\n", lpulses, m_izdo.rpm);
+        //printf("Left motor: pulses=%u, rpm=%u\n", lpulses, m_izdo.rpm);
     }
     
     l_end:
@@ -605,7 +610,7 @@ int pv, kp=15;
         rpulses = current_rcounter - past_rcounter;
         rfreq = (1000000*rpulses)/rperiod;
         m_dcho.rpm = rfreq*60/NUMHOLES/2;
-        printf("Right motor: pulses=%u, rpm=%u\n", rpulses, m_dcho.rpm);
+        //printf("Right motor: pulses=%u, rpm=%u\n", rpulses, m_dcho.rpm);
     }
     
     r_end:
@@ -624,7 +629,7 @@ int pv, kp=15;
     pv = lpulses - rpulses;
     if (pv<=1 && pv >=-1) return;  // Tolerable error, do not enter control section
     
-    printf("\tAdjust left: %i, right: %i\n", -(kp*pv)/10, (kp*pv)/10);
+    //printf("\tAdjust left: %i, right: %i\n", -(kp*pv)/10, (kp*pv)/10);
     pthread_mutex_lock(&m_izdo.mutex);
     pthread_mutex_lock(&m_dcho.mutex);   
     m_izdo.PWMduty -= (kp*pv)/10;
@@ -638,6 +643,23 @@ int pv, kp=15;
     pthread_mutex_unlock(&m_izdo.mutex); 
     pthread_mutex_unlock(&m_dcho.mutex);
 }
+
+
+/****************** Funciones del display **************************/
+
+void oledBigMessage(const char *msg)
+{
+    static const char *empty = "        ";
+    char *buf;
+    
+    if (msg) buf = (char *)msg; 
+    else buf = (char *)empty;
+    
+    oledWriteString(0, 2, buf, 1); 
+}
+
+
+
 
 
 
@@ -669,16 +691,18 @@ void getPowerState(void)
     
     // señal acústica en caso de batería baja
     if (powerState == PI_OFF) {
+        oledBigMessage("Bateria!");
         while(n--) {
             pito(2, 1);  // pita 2 décimas en este hilo (vuelve después de pitar)
             gpioSleep(PI_TIME_RELATIVE, 0, 200000);  // espera 2 décimas de segundo
         }
+        oledBigMessage(NULL);
     }
 }
 
 
 
-/* Al recibir una señal, para el coche, cierra todo y termina el programa */
+/* Para el coche, cierra todo y termina el programa */
 void terminate(int signum)
 {
    stopMotor(&m_izdo);
@@ -691,6 +715,8 @@ void terminate(int signum)
    gpioWrite(bocina.pin, PI_OFF);
    gpioSetMode(AUDR_PIN, PI_INPUT);
    gpioSetMode(AMPLI_PIN, PI_INPUT);
+
+   oledShutdown();
    gpioTerminate();
    exit(1);
 }
@@ -705,7 +731,14 @@ int setup(void)
    gpioCfgInterfaces(PI_DISABLE_FIFO_IF | PI_DISABLE_SOCK_IF);
    if (gpioInitialise()<0) return 1;
    if (gpioSetSignalFunc(SIGINT, terminate)<0) return 1;
-    
+   
+   // Inicializa display. Primero, los pines I2C 2 y 3 del GPIO, el bus i2c
+   gpioSetMode(2, PI_ALT0);   
+   gpioSetMode(3, PI_ALT0);   
+   oledInit(DISPLAY_I2C);
+   oledFill(0xFF); // fill with white: life sign
+      
+   // Inicializa altavoz y bocina
    setupSound(AMPLI_PIN);
    setVolume(soundVolume);
    gpioSetMode(AUDR_PIN, AUDR_ALT);  // Saca PWM0 (audio right) por el GPIO al amplificador
@@ -733,7 +766,9 @@ int setup(void)
    setupWiimote();
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
-   if (!remoteOnly) r |= setupSonar();
+   
+   oledFill(0); // fill with black: clear display
+   r |= setupSonar();
    r |= sem_init(&semaphore, 0, 0);
    return r;
 }
@@ -775,7 +810,10 @@ void main(int argc, char *argv[])
        else exit(1);
    }
     
+   oledBigMessage(" Ready  ");
    audioplay("sounds/ready.wav", 1);
+   oledBigMessage(NULL);
+   
    if (mando.wiimote==NULL) {  // No hay mando, el coche es autónomo
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);       
@@ -787,13 +825,16 @@ void main(int argc, char *argv[])
        if (r) {
             perror("Error al esperar al semaforo");
        }
-       if (remoteOnly) continue;      
+       if (remoteOnly) continue;     
+
+       // Loop for autonomous mode       
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;
        
        while (distancia < DISTMIN) {
             //printf("Distancia: %d cm\n", distancia); 
             stopMotor(&m_izdo);
             stopMotor(&m_dcho);
+            oledBigMessage("  STOP  ");
             //pito(2, 0);  // pita 2 décimas en otro hilo (vuelve inmediatamente)
             gpioSleep(PI_TIME_RELATIVE, 1, 0);
        
@@ -807,6 +848,7 @@ void main(int argc, char *argv[])
             stopMotor(&m_izdo);
             stopMotor(&m_dcho);
        }
+       oledBigMessage(NULL);
        // Hemos esquivado el obstáculo, ahora velocidad normal si A está pulsada
        if (!mando.wiimote || mando.buttons&CWIID_BTN_A) {
             ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
