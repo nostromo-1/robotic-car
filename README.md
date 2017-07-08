@@ -38,6 +38,7 @@ The following parts are needed to build it:
 ## Software
 The robot runs on raspbian, I have tested it on the releases from mid 2016. It is programmed in C. It makes use of the [pigpio library] (http://abyz.co.uk/rpi/pigpio/) for GPIO access. It also needs the bluetooth and alsa libraries.
 The program avoids active loops in order to make a light use of CPU. Its CPU usage is about 7% (which is due to pigpio). It makes use of event loops and semaphores in order to avoid active loops.
+The display control code is included in the software for simplicity, it does not need any display driver library.
 
 The following packages need to be installed (`sudo apt-get install`):
 * libbluetooth-dev
