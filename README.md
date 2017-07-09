@@ -1,4 +1,4 @@
-# robotic-car
+# Robotic Car
 Project of a robotic car with raspberry pi as control unit
 
 This project is about building a hobby robotic car.
