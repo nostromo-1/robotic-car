@@ -393,6 +393,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
         case CWIID_MESG_BTN:  // Change in buttons
             mando.buttons = mesg[i].btn_mesg.buttons;
                        
+            /*** Botones + y - ***/           
             if (previous_buttons&CWIID_BTN_PLUS && ~mando.buttons&CWIID_BTN_PLUS) {
                 if (mando.buttons&CWIID_BTN_1) { /* sube volumen: buttons ´1´ + ´+´ */
                     soundVolume += 2;
@@ -411,41 +412,43 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                     if (soundVolume < 0) soundVolume = 0;
                     setVolume(soundVolume);
                 } 
-                else {
+                else { /* ajusta la velocidad del coche y la marca en leds del mando */
                     velocidadCoche -= 10;
                     if (velocidadCoche < 0) velocidadCoche = 0;
                     cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
                 }
             }
             
-            /*** Botones A y B, leen la variable global "velocidadCoche" ***/
-            if (mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
-                v_izdo = v_dcho = velocidadCoche;
-                if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
-                else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrás (botón B), invierte sentido
-
-                /*** Botones LEFT y RIGHT, giran el coche ***/
-                if (mando.buttons&CWIID_BTN_RIGHT) {
-                    s_dcho = 1 - s_dcho;
-                    if (softTurn) v_dcho = 0; 
-                    v_izdo += softTurn?0:30;
-                } 
+            /*** Botones A, B y RIGHT, LEFT; si estamos esquivando, controla el loop de main ***/
+            if (!esquivando) {
+                /*** Botones A y B, leen la variable global "velocidadCoche" ***/
+                if (mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
+                    v_izdo = v_dcho = velocidadCoche;
+                    if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
+                    else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrás (botón B), invierte sentido
+    
+                    /*** Botones LEFT y RIGHT, giran el coche ***/
+                    if (mando.buttons&CWIID_BTN_RIGHT) {
+                        s_dcho = 1 - s_dcho;
+                        if (softTurn) v_dcho = 0; 
+                        v_izdo += softTurn?0:30;
+                    } 
             
-                if (mando.buttons&CWIID_BTN_LEFT) {
-                    s_izdo = 1 - s_izdo;
-                    if (softTurn) v_izdo = 0; 
-                    v_dcho += softTurn?0:30;                
+                    if (mando.buttons&CWIID_BTN_LEFT) {
+                        s_izdo = 1 - s_izdo;
+                        if (softTurn) v_izdo = 0; 
+                        v_dcho += softTurn?0:30;                
+                    }
                 }
+                else {  // Ni A ni B pulsados
+                    v_izdo = v_dcho = 0;
+                    s_izdo = s_dcho = ADELANTE;
+                }
+                        
+                /*** Ahora activa la velocidadCoche calculada en cada motor ***/
+                ajustaMotor(&m_izdo, v_izdo, s_izdo);
+                ajustaMotor(&m_dcho, v_dcho, s_dcho);
             }
-            else {  // Ni A ni B pulsados
-                v_izdo = v_dcho = 0;
-                s_izdo = s_dcho = ADELANTE;
-            }
-                    
-            /*** Ahora activa la velocidadCoche calculada en cada motor ***/
-            ajustaMotor(&m_izdo, v_izdo, s_izdo);
-            ajustaMotor(&m_dcho, v_dcho, s_dcho);
-        
     
             /*** pito ***/
             if (~previous_buttons&CWIID_BTN_DOWN && mando.buttons&CWIID_BTN_DOWN) activaPito();    
@@ -736,7 +739,7 @@ int setup(void)
    gpioSetMode(2, PI_ALT0);   
    gpioSetMode(3, PI_ALT0);   
    oledInit(DISPLAY_I2C);
-   oledFill(0xFF); // fill with white: life sign
+   oledSetInversion(1);   // Fill display, as life sign
       
    // Inicializa altavoz y bocina
    setupSound(AMPLI_PIN);
@@ -767,7 +770,7 @@ int setup(void)
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
    
-   oledFill(0); // fill with black: clear display
+   oledSetInversion(0); // clear display
    r |= setupSonar();
    r |= sem_init(&semaphore, 0, 0);
    return r;

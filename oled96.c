@@ -28,6 +28,8 @@ Based on the following original code:
 #include <pthread.h>
 #include <pigpio.h>
 
+#include "oled96.h"
+
 #define I2C_BUS 1   // Bus 0 for Rev 1 boards, bus 1 for newer boards
 
 extern unsigned char ucFont[];
@@ -37,6 +39,9 @@ static int i2c_handle = -1;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     
 static void oledWriteCommand(unsigned char);
+static void oledWriteCommand2(unsigned char c, unsigned char d);
+static void oledSetPosition(int x, int y);
+static void oledWriteDataBlock(unsigned char *ucBuf, int iLen);
 static void RotateFont90(void);
 
 // Opens a file system handle to the I2C device
@@ -46,8 +51,7 @@ int oledInit(int iAddr)
 {
 int rc;
 char initbuf[]={0x00,0xae,0xa8,0x3f,0xd3,0x00,0x40,0xa0,0xa1,0xc0,0xc8,
-			0xda,0x12,0x81,0xff,0xa4,0xa6,0xd5,0x80,0x8d,0x14,
-			0xaf,0x20,0x02};
+			0xda,0x12,0x81,0xff,0xa4,0xa6,0xd5,0x80,0x8d,0x14,0x20,0x02};
 
     i2c_handle = i2cOpen(I2C_BUS, iAddr, 0);        
     if (i2c_handle < 0) {
@@ -62,7 +66,9 @@ char initbuf[]={0x00,0xae,0xa8,0x3f,0xd3,0x00,0x40,0xa0,0xa1,0xc0,0xc8,
         return rc;
     }        
     
-    oledFill(0);    // Put display memory to zero    
+    oledFill(0);    // Put display memory to zero   
+    oledWriteCommand(0xAF);  // turn on OLED
+    //oledSetContrast(30);
    	RotateFont90(); // fix font orientation for OLED
     return 0;    
 } /* oledInit() */
@@ -112,6 +118,16 @@ int oledSetContrast(unsigned char ucContrast)
 
 
 
+int oledSetInversion(unsigned char invert)
+{
+    if (i2c_handle < 0) return -1;
+        
+    if (invert == 0) oledWriteCommand(0xA6);
+    else oledWriteCommand(0xA7);
+    return 0;
+}
+
+
 // Send commands to position the "cursor" to the given
 // row and column
 static void oledSetPosition(int x, int y)
@@ -146,19 +162,21 @@ int rc, rest;
         return;
     }
     memcpy(&ucTemp[1], ucBuf, iLen);
-    rc = i2cWriteDevice(i2c_handle, ucTemp, iLen+1);
-    if (rc < 0) perror("oledWriteDataBlock: Error writing to i2c bus");
     
-	// Keep a copy in local buffer, taking care not to overflow
-    rest = sizeof(ucScreen) - iScreenOffset;
+	// Keep a copy in local buffer, taking care not to overflow to beginning of row (display in page mode)
+    rest = 128 - iScreenOffset%128;
     if (rest >= iLen) {
-        memcpy(&ucScreen[iScreenOffset], ucBuf, iLen);
+        rc = i2cWriteDevice(i2c_handle, ucTemp, iLen+1);
+        if (rc < 0) perror("oledWriteDataBlock: Error writing to i2c bus");  
+        memcpy(&ucScreen[iScreenOffset], ucBuf, iLen);        
         iScreenOffset += iLen;
     }
     else {
+        rc = i2cWriteDevice(i2c_handle, ucTemp, rest+1);
+        if (rc < 0) perror("oledWriteDataBlock: Error writing to i2c bus");          
         memcpy(&ucScreen[iScreenOffset], ucBuf, rest);
         iScreenOffset += rest;
-    }
+    }    
 }
 
 // Set (or clear) an individual pixel

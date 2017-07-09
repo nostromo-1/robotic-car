@@ -35,5 +35,9 @@ int oledSetPixel(int x, int y, unsigned char ucPixel);
 // Valid values are 0-255 where 0=off and 255=max brightness
 int oledSetContrast(unsigned char ucContrast);
 
+// Sets the inversion state of the display
+// 0 is normal image, anything else inverted image 
+int oledSetInversion(unsigned char invert);
+
 
 #endif // OLED96_H
