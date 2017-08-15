@@ -124,6 +124,22 @@ Motor_t m_dcho = {
 
 
 
+/****************** Funciones del display **************************/
+
+void oledBigMessage(const char *msg)
+{
+    static const char *empty = "        ";
+    char *buf;
+    
+    if (msg) buf = (char *)msg; 
+    else buf = (char *)empty;
+    
+    oledWriteString(0, 2, buf, true); 
+}
+
+
+
+
 /****************** Funciones de control de los motores **************************/
 void ajustaSentido(Motor_t *motor, Sentido_t dir)
 {
@@ -255,9 +271,9 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            /* Calculate moving average */
            for (i=0, suma=0; i<NUMPOS; i++) suma += distance_array[i]; 
            distancia = suma/NUMPOS;   /* La variable de salida, global */
-           snprintf(str, sizeof(str), "Dist (cm): %-4u", distancia);
+           snprintf(str, sizeof(str), "Dist (cm): %-3u", distancia);
            //printf("%s\n", str);
-           oledWriteString(0, 0, str, 0);
+           oledWriteString(0, 0, str, false);
            if (!remoteOnly && distancia < DISTMIN && !esquivando) {
                 esquivando = true;
                 i = sem_post(&semaphore);  // indica a main que hay un obstáculo delante
@@ -480,15 +496,19 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
 
 void setupWiimote(void)
 {
+    static uint8_t bluetooth_glyph[] = {0, 66, 36, 255, 153, 90, 36, 0};
     cwiid_wiimote_t *wiimote;
     bdaddr_t ba;
     
     if (mando.wiimote) cwiid_close(mando.wiimote);
     cwiid_set_err(wiiErr);
     mando.buttons = 0;
+    oledSetGraph8(15*8, 0, NULL);
+    oledBigMessage("  SCAN  ");
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
+    
     printf("Pulsa las teclas 1 y 2 en el mando de la Wii...\n");
-    gpioSleep(PI_TIME_RELATIVE, 2, 0);  // para desconectar el mando si estaba conectado
+    gpioSleep(PI_TIME_RELATIVE, 2, 0);  // para dar tiempo a desconectar el mando si estaba conectado
     ba = *BDADDR_ANY;
     wiimote = cwiid_open_timeout(&ba, 0, 5);
     if (!wiimote ||
@@ -497,10 +517,15 @@ void setupWiimote(void)
         cwiid_enable(wiimote, CWIID_FLAG_MESG_IFC)) {
             fprintf(stderr, "No puedo conectarme al mando de la Wii!\n");
             mando.wiimote = NULL;
+            oledBigMessage(NULL);
             return;  // No es error si no hay wiimote, el coche funciona sin mando
     } 
+    
+    // wiimote found
     mando.wiimote = wiimote;
     printf("Conectado al mando de la Wii\n");
+    oledBigMessage(NULL);
+    oledSetGraph8(15*8, 0, bluetooth_glyph);
     cwiid_set_rumble(wiimote, 1);  // señala mediante zumbido el mando sincronizado
     gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos
     cwiid_set_rumble(wiimote, 0);
@@ -519,8 +544,9 @@ static bool pressed;
             if (!pressed) return;   // elimina clicks espureos
             pressed = false;
             
-            /* Long press: shutdown */
-            if (time-tick > 2*1000000) {
+            /* Long press (>2 sec): shutdown */
+            if (tick-time > 2*1000000) {
+                oledBigMessage("SHUTDOWN");
                 pito(10, 1);
                 execlp("halt", "halt", NULL);
                 return; // should never return
@@ -648,22 +674,6 @@ int pv, kp=15;
 }
 
 
-/****************** Funciones del display **************************/
-
-void oledBigMessage(const char *msg)
-{
-    static const char *empty = "        ";
-    char *buf;
-    
-    if (msg) buf = (char *)msg; 
-    else buf = (char *)empty;
-    
-    oledWriteString(0, 2, buf, 1); 
-}
-
-
-
-
 
 
 /****************** Funciones auxiliares varias **************************/
@@ -677,6 +687,7 @@ Esto es necesario porque al arrancar los motores hay un tiempo de oscilación de 
 aunque está amortiguado por el condensador del circuito */    
 void getPowerState(void)
 {
+    static uint8_t emptybatt_glyph[] = {0, 0, 254, 131, 131, 254, 0, 0};
     int power1, power2, power3;
     int n = 3;
     
@@ -695,6 +706,7 @@ void getPowerState(void)
     // señal acústica en caso de batería baja
     if (powerState == PI_OFF) {
         oledBigMessage("Bateria!");
+        oledSetGraph8(14*8, 0, emptybatt_glyph);
         while(n--) {
             pito(2, 1);  // pita 2 décimas en este hilo (vuelve después de pitar)
             gpioSleep(PI_TIME_RELATIVE, 0, 200000);  // espera 2 décimas de segundo
@@ -739,7 +751,7 @@ int setup(void)
    gpioSetMode(2, PI_ALT0);   
    gpioSetMode(3, PI_ALT0);   
    oledInit(DISPLAY_I2C);
-   oledSetInversion(1);   // Fill display, as life sign
+   oledSetInversion(true);   // Fill display, as life sign
       
    // Inicializa altavoz y bocina
    setupSound(AMPLI_PIN);
@@ -770,7 +782,7 @@ int setup(void)
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
    
-   oledSetInversion(0); // clear display
+   oledSetInversion(false); // clear display
    r |= setupSonar();
    r |= sem_init(&semaphore, 0, 0);
    return r;
@@ -812,12 +824,12 @@ void main(int argc, char *argv[])
        if (r < 0) terminate(SIGINT);   // Si el error estaba al inicializar pigpio (r>0), no llames a terminate
        else exit(1);
    }
-    
+  
    oledBigMessage(" Ready  ");
    audioplay("sounds/ready.wav", 1);
    oledBigMessage(NULL);
    
-   if (mando.wiimote==NULL) {  // No hay mando, el coche es autónomo
+   if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autónomo
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);       
    }
@@ -829,10 +841,9 @@ void main(int argc, char *argv[])
             perror("Error al esperar al semaforo");
        }
        if (remoteOnly) continue;     
-
-       // Loop for autonomous mode       
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;
        
+       // Loop for autonomous mode 
        while (distancia < DISTMIN) {
             //printf("Distancia: %d cm\n", distancia); 
             stopMotor(&m_izdo);

@@ -25,6 +25,7 @@ Based on the following original code:
 #include <stdio.h>
 #include <string.h>
 #include <errno.h>
+#include <stdbool.h>
 #include <pthread.h>
 #include <pigpio.h>
 
@@ -32,16 +33,16 @@ Based on the following original code:
 
 #define I2C_BUS 1   // Bus 0 for Rev 1 boards, bus 1 for newer boards
 
-extern unsigned char ucFont[];
+extern uint8_t ucFont[];
 static int iScreenOffset; // current write offset of screen data
-static unsigned char ucScreen[1024]; // local copy of the image buffer
+static uint8_t ucScreen[1024]; // local copy of the image buffer
 static int i2c_handle = -1;
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
     
-static void oledWriteCommand(unsigned char);
-static void oledWriteCommand2(unsigned char c, unsigned char d);
+static void oledWriteCommand(uint8_t);
+static void oledWriteCommand2(uint8_t c, uint8_t d);
 static void oledSetPosition(int x, int y);
-static void oledWriteDataBlock(unsigned char *ucBuf, int iLen);
+static void oledWriteDataBlock(uint8_t *ucBuf, int iLen);
 static void RotateFont90(void);
 
 // Opens a file system handle to the I2C device
@@ -50,25 +51,25 @@ static void RotateFont90(void);
 int oledInit(int iAddr)
 {
 int rc;
-char initbuf[]={0x00,0xae,0xa8,0x3f,0xd3,0x00,0x40,0xa0,0xa1,0xc0,0xc8,
+uint8_t initbuf[]={0x00,0xae,0xa8,0x3f,0xd3,0x00,0x40,0xa0,0xa1,0xc0,0xc8,
 			0xda,0x12,0x81,0xff,0xa4,0xa6,0xd5,0x80,0x8d,0x14,0x20,0x02};
 
     i2c_handle = i2cOpen(I2C_BUS, iAddr, 0);        
     if (i2c_handle < 0) {
-        perror("oledInit: Cannot open display");
+        fprintf(stderr, "oledInit: Cannot open display\n");
         return i2c_handle;
     }
     rc = i2cWriteDevice(i2c_handle, initbuf, sizeof(initbuf));
     if (rc < 0) {
-        perror("oledInit: Error initializing display"); 
+        fprintf(stderr, "oledInit: Error initializing display\n"); 
         i2cClose(i2c_handle);
         i2c_handle = -1;
         return rc;
     }        
     
-    oledFill(0);    // Put display memory to zero   
+    oledFill(0);    // Set display memory to zero   
     oledWriteCommand(0xAF);  // turn on OLED
-    //oledSetContrast(30);
+    oledSetContrast(30);
    	RotateFont90(); // fix font orientation for OLED
     return 0;    
 } /* oledInit() */
@@ -86,27 +87,27 @@ void oledShutdown()
 }
 
 // Send a single byte command to the OLED controller
-static void oledWriteCommand(unsigned char c)
+static void oledWriteCommand(uint8_t c)
 {
     int rc;
     
     // 0x00 is the command introducer
     rc = i2cWriteByteData(i2c_handle, 0x00, c);
-    if (rc < 0) perror("oledWriteCommand: Error writing to display");
+    if (rc < 0) fprintf(stderr,"oledWriteCommand: Error writing to display\n");
 } /* oledWriteCommand() */
 
-static void oledWriteCommand2(unsigned char c, unsigned char d)
+static void oledWriteCommand2(uint8_t c, uint8_t d)
 {
     int rc;
-    unsigned int value;
+    uint16_t value;
     
     value = d<<8 | c;
     // 0x00 is the command introducer
     rc = i2cWriteWordData(i2c_handle, 0x00, value);
-    if (rc < 0) perror("oledWriteCommand2: Error writing to display");
+    if (rc < 0) fprintf(stderr, "oledWriteCommand2: Error writing to display\n");
 } /* oledWriteCommand2() */
 
-int oledSetContrast(unsigned char ucContrast)
+int oledSetContrast(uint8_t ucContrast)
 {
     if (i2c_handle < 0) return -1;
 
@@ -118,11 +119,11 @@ int oledSetContrast(unsigned char ucContrast)
 
 
 
-int oledSetInversion(unsigned char invert)
+int oledSetInversion(bool invert)
 {
     if (i2c_handle < 0) return -1;
         
-    if (invert == 0) oledWriteCommand(0xA6);
+    if (invert == false) oledWriteCommand(0xA6);
     else oledWriteCommand(0xA7);
     return 0;
 }
@@ -146,19 +147,19 @@ static void oledSetPosition(int x, int y)
 
 // Write a block of pixel data to the OLED
 // Length can be anything from 1 to 128 (whole line)
-static void oledWriteDataBlock(unsigned char *ucBuf, int iLen)
+static void oledWriteDataBlock(uint8_t *ucBuf, int iLen)
 {
-unsigned char ucTemp[129];
+uint8_t ucTemp[129];
 int rc, rest;
 
 	ucTemp[0] = 0x40; // data command
     
     if (!ucBuf) {
-        perror("oledWriteDataBlock: Invalid buffer");
+        fprintf(stderr, "oledWriteDataBlock: Invalid buffer\n");
         return;    
     }
     if (iLen < 1 || iLen > 128) {
-        perror("oledWriteDataBlock: Invalid length for display data");
+        fprintf(stderr, "oledWriteDataBlock: Invalid length for display data\n");
         return;
     }
     memcpy(&ucTemp[1], ucBuf, iLen);
@@ -167,13 +168,13 @@ int rc, rest;
     rest = 128 - iScreenOffset%128;
     if (rest >= iLen) {
         rc = i2cWriteDevice(i2c_handle, ucTemp, iLen+1);
-        if (rc < 0) perror("oledWriteDataBlock: Error writing to i2c bus");  
+        if (rc < 0) fprintf(stderr, "oledWriteDataBlock: Error writing to i2c bus\n");  
         memcpy(&ucScreen[iScreenOffset], ucBuf, iLen);        
         iScreenOffset += iLen;
     }
     else {
         rc = i2cWriteDevice(i2c_handle, ucTemp, rest+1);
-        if (rc < 0) perror("oledWriteDataBlock: Error writing to i2c bus");          
+        if (rc < 0) fprintf(stderr, "oledWriteDataBlock: Error writing to i2c bus\n");          
         memcpy(&ucScreen[iScreenOffset], ucBuf, rest);
         iScreenOffset += rest;
     }    
@@ -183,10 +184,10 @@ int rc, rest;
 // The local copy of the frame buffer is used to avoid
 // reading data from the display controller
 // Coordinate system is pixels, not text rows (0-127, 0-63)
-int oledSetPixel(int x, int y, unsigned char ucColor)
+int oledSetPixel(int x, int y, uint8_t ucColor)
 {
 int i;
-unsigned char uc, ucOld;
+uint8_t uc, ucOld;
 
 	if (i2c_handle < 0) return -1;
     if (x<0 || x>127 || y<0 || y>63) {
@@ -209,12 +210,12 @@ unsigned char uc, ucOld;
 
 // Draw a string of small (8x8) or large (16x24) characters
 // At the given col+row
-int oledWriteString(int x, int y, char *szMsg, int bLarge)
+int oledWriteString(int x, int y, char *szMsg, bool bLarge)
 {
 int i, j, iLen;
-unsigned char *s;
+uint8_t *s;
 
-	if (i2c_handle < 0) return -1; // not initialized
+	if (i2c_handle < 0) return -1; 
     if (y<0 || y>7 || x<0 || x>127) {
         fprintf(stderr, "oledWriteString: Invalid coordinates for display\n");
         return -1;
@@ -230,7 +231,7 @@ unsigned char *s;
             pthread_mutex_lock(&mutex);
             oledSetPosition(x, y+i);
             for (j=0; j<iLen; j++) {
-                s = &ucFont[9728 + (unsigned char)(szMsg[j]&0x7F)*64];  // 0x7F: only 128 characters
+                s = &ucFont[9728 + (uint8_t)(szMsg[j]&0x7F)*64];  // 0x7F: font has only 128 characters
                 oledWriteDataBlock(s+16*i, 16);
             }
             pthread_mutex_unlock(&mutex); 
@@ -240,7 +241,7 @@ unsigned char *s;
         pthread_mutex_lock(&mutex);
 		oledSetPosition(x, y);
 		for (i=0; i<iLen; i++) {
-			s = &ucFont[(unsigned char)szMsg[i]*8];
+			s = &ucFont[(uint8_t)szMsg[i]*8];
 			oledWriteDataBlock(s, 8); // write character pattern
 		}	
         pthread_mutex_unlock(&mutex);
@@ -249,14 +250,38 @@ unsigned char *s;
 	return 0;
 } /* oledWriteString() */
 
+
+// Write an 8x8 bitmap to display
+// graph is an 8 byte array, glyph must be turned 90 degrees to the right
+int oledSetGraph8(int x, int y, uint8_t* graph)
+{
+    static uint8_t empty[] = {0, 0, 0, 0, 0, 0, 0, 0};  // empty space
+    uint8_t *buf;
+    
+	if (i2c_handle < 0) return -1; 
+    if (y<0 || y>7 || x<0 || x>127) {
+        fprintf(stderr, "oledSetGraph8: Invalid coordinates for display\n");
+        return -1;
+    }
+    if (graph) buf = graph;
+    else buf = empty;
+    
+    pthread_mutex_lock(&mutex);
+    oledSetPosition(x, y);
+    oledWriteDataBlock(buf, 8);
+    pthread_mutex_unlock(&mutex);
+	return 0;
+} 
+
+
 // Fill the frame buffer with a byte pattern
 // e.g. all off (0x00) or all on (0xff)
-int oledFill(unsigned char ucData)
+int oledFill(uint8_t ucData)
 {
 int y;
-unsigned char temp[128];
+uint8_t temp[128];
 
-	if (i2c_handle < 0) return -1; // not initialized
+	if (i2c_handle < 0) return -1; 
 
 	memset(temp, ucData, 128);
 	for (y=0; y<8; y++) {
@@ -272,9 +297,9 @@ unsigned char temp[128];
 // Fix the orientation of the font image data
 static void RotateFont90(void)
 {
-unsigned char ucTemp[64];
+uint8_t ucTemp[64];
 int i, j, x, y;
-unsigned char c, c2, ucMask, *s, *d;
+uint8_t c, c2, ucMask, *s, *d;
 
 	// Rotate the 8x8 font
 	for (i=0; i<256; i++) {  // fix 8x8 font by rotating it 90 deg clockwise
