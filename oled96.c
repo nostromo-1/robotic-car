@@ -231,7 +231,7 @@ uint8_t *s;
             pthread_mutex_lock(&mutex);
             oledSetPosition(x, y+i);
             for (j=0; j<iLen; j++) {
-                s = &ucFont[9728 + (uint8_t)(szMsg[j]&0x7F)*64];  // 0x7F: font has only 128 characters
+                s = &ucFont[9728 + (uint8_t)(szMsg[j]&0x7F)*64];  // 0x7F: large font has only 128 characters
                 oledWriteDataBlock(s+16*i, 16);
             }
             pthread_mutex_unlock(&mutex); 

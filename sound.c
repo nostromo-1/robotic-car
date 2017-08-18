@@ -164,7 +164,7 @@ void* play_wav(void *filename)
     }
     
     munmap(mem, 12);
-    if (filelen > 50000000) {
+    if (filelen > 50000000) {  // Random: evita ficheros grandes dañados
         fprintf(stderr, "Error: mal fichero de audio\n");    
         close(fd);
         pthread_exit(NULL);                
@@ -203,7 +203,7 @@ void* play_wav(void *filename)
                 pcmFormat = SND_PCM_FORMAT_S16_LE;
                 break;
             default:
-                fprintf(stderr, "Error: solo se admiten 8 bits o 16 bits\n");    
+                fprintf(stderr, "Error: solo se admiten audios de 8 bits o 16 bits\n");    
                 munmap(mem, filelen);
                 pthread_exit(NULL);            
     }
@@ -263,6 +263,7 @@ void* play_wav(void *filename)
 
     gpioWrite(ampliPIN, PI_ON);   // Activate amplifier
     gpioSleep(PI_TIME_RELATIVE, 0, 100000);  // Wait for ampli to stabilize
+    
     /* Bucle enviando datos de audio */
     while (rest = mem + filelen - p, rest>0) {
         if (cancel_audio) break;

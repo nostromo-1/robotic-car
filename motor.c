@@ -49,6 +49,7 @@ extern int optind, opterr, optopt;
 #define RSENSOR_PIN 6
 
 #define DISTMIN 50  /* distancia en cm a la que entendemos que hay un obstáculo */
+#define INITIAL_SPEED 50 /* Entre 0 y 100 */
 
 #define DISPLAY_I2C 0x3C  /* Puerto i2c del display SSD1306 */
 
@@ -88,7 +89,7 @@ typedef struct {
 
 
 volatile uint32_t distancia = UINT32_MAX;
-volatile int velocidadCoche = 50;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
+volatile int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 volatile int powerState = PI_ON;
 volatile bool esquivando;
 
@@ -126,15 +127,19 @@ Motor_t m_dcho = {
 
 /****************** Funciones del display **************************/
 
-void oledBigMessage(const char *msg)
+void oledBigMessage(int line, const char *msg)
 {
     static const char *empty = "        ";
     char *buf;
     
+    if (line<0 || line>1) {
+        fprintf(stderr, "oledBigMessage: line must be 0 or 1\n");
+        return;
+    }
     if (msg) buf = (char *)msg; 
     else buf = (char *)empty;
     
-    oledWriteString(0, 2, buf, true); 
+    oledWriteString(0, 2+3*line, buf, true); 
 }
 
 
@@ -291,7 +296,7 @@ int setupSonar(void)
    gpioSetMode(SONAR_ECHO, PI_INPUT);
 
    /* update sonar several times a second, timer #0 */
-   if (gpioSetTimerFunc(0, 60, sonarTrigger) ||     /* every 60ms */
+   if (gpioSetTimerFunc(0, 60, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
         gpioSetAlertFunc(SONAR_ECHO, sonarEcho)) {  /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
         return -1;
@@ -503,8 +508,8 @@ void setupWiimote(void)
     if (mando.wiimote) cwiid_close(mando.wiimote);
     cwiid_set_err(wiiErr);
     mando.buttons = 0;
-    oledSetGraph8(15*8, 0, NULL);
-    oledBigMessage("  SCAN  ");
+    oledSetGraph8(15*8, 0, NULL);  // 15: last position in line (0-15)
+    oledBigMessage(1, "Scan... ");
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
     
     printf("Pulsa las teclas 1 y 2 en el mando de la Wii...\n");
@@ -517,14 +522,14 @@ void setupWiimote(void)
         cwiid_enable(wiimote, CWIID_FLAG_MESG_IFC)) {
             fprintf(stderr, "No puedo conectarme al mando de la Wii!\n");
             mando.wiimote = NULL;
-            oledBigMessage(NULL);
+            oledBigMessage(1, NULL);
             return;  // No es error si no hay wiimote, el coche funciona sin mando
     } 
     
     // wiimote found
     mando.wiimote = wiimote;
     printf("Conectado al mando de la Wii\n");
-    oledBigMessage(NULL);
+    oledBigMessage(1, NULL);
     oledSetGraph8(15*8, 0, bluetooth_glyph);
     cwiid_set_rumble(wiimote, 1);  // señala mediante zumbido el mando sincronizado
     gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos
@@ -546,7 +551,7 @@ static bool pressed;
             
             /* Long press (>2 sec): shutdown */
             if (tick-time > 2*1000000) {
-                oledBigMessage("SHUTDOWN");
+                oledBigMessage(1, "SHUTDOWN");
                 pito(10, 1);
                 execlp("halt", "halt", NULL);
                 return; // should never return
@@ -555,9 +560,11 @@ static bool pressed;
             /* Short press: scan wiimotes */
             ajustaMotor(&m_izdo, 0, ADELANTE);  // Para el coche mientras escanea wiimotes
             ajustaMotor(&m_dcho, 0, ADELANTE);
-            velocidadCoche = 50;   // Nueva velocidad inicial, con o sin mando  
+            velocidadCoche = INITIAL_SPEED;   // Nueva velocidad inicial, con o sin mando 
+            oledWriteString(0, 1, "    ", false); // Borra mensaje de "Auto", si está           
             setupWiimote();   
             if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
+                oledWriteString(0, 1, "Auto", false);
                 ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
                 ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
             }
@@ -612,7 +619,7 @@ static uint32_t past_rcounter, past_rtick;
 uint32_t current_rcounter =  m_dcho.counter, current_rtick = m_dcho.tick;  
 uint32_t rpulses=0, rperiod, rfreq;
   
-int pv, kp=15;  
+int pv, kp=15;  // parameters of PID filter: pv is measured error (process value), kp is proportionality constant
   
     // Left motor
     if (past_ltick == 0) goto l_end;  // Exceptionally, it seems a good use of goto
@@ -658,6 +665,7 @@ int pv, kp=15;
     pv = lpulses - rpulses;
     if (pv<=1 && pv >=-1) return;  // Tolerable error, do not enter control section
     
+    /** Control section loop; adjust parameters of filter **/
     //printf("\tAdjust left: %i, right: %i\n", -(kp*pv)/10, (kp*pv)/10);
     pthread_mutex_lock(&m_izdo.mutex);
     pthread_mutex_lock(&m_dcho.mutex);   
@@ -705,13 +713,13 @@ void getPowerState(void)
     
     // señal acústica en caso de batería baja
     if (powerState == PI_OFF) {
-        oledBigMessage("Bateria!");
+        oledBigMessage(0, "Bateria!");
         oledSetGraph8(14*8, 0, emptybatt_glyph);
         while(n--) {
             pito(2, 1);  // pita 2 décimas en este hilo (vuelve después de pitar)
             gpioSleep(PI_TIME_RELATIVE, 0, 200000);  // espera 2 décimas de segundo
         }
-        oledBigMessage(NULL);
+        oledBigMessage(0, NULL);
     }
 }
 
@@ -825,11 +833,12 @@ void main(int argc, char *argv[])
        else exit(1);
    }
   
-   oledBigMessage(" Ready  ");
+   oledBigMessage(0, " Ready  ");
    audioplay("sounds/ready.wav", 1);
-   oledBigMessage(NULL);
+   oledBigMessage(0, NULL);
    
    if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autónomo
+        oledWriteString(0, 1, "Auto", false);
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);       
    }
@@ -839,6 +848,7 @@ void main(int argc, char *argv[])
        r = sem_wait(&semaphore);   // bloquea hasta que encontremos un obstáculo
        if (r) {
             perror("Error al esperar al semaforo");
+            continue;
        }
        if (remoteOnly) continue;     
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;
@@ -848,7 +858,7 @@ void main(int argc, char *argv[])
             //printf("Distancia: %d cm\n", distancia); 
             stopMotor(&m_izdo);
             stopMotor(&m_dcho);
-            oledBigMessage("  STOP  ");
+            oledBigMessage(0, "  STOP  ");
             //pito(2, 0);  // pita 2 décimas en otro hilo (vuelve inmediatamente)
             gpioSleep(PI_TIME_RELATIVE, 1, 0);
        
@@ -862,7 +872,7 @@ void main(int argc, char *argv[])
             stopMotor(&m_izdo);
             stopMotor(&m_dcho);
        }
-       oledBigMessage(NULL);
+       oledBigMessage(0, NULL);
        // Hemos esquivado el obstáculo, ahora velocidad normal si A está pulsada
        if (!mando.wiimote || mando.buttons&CWIID_BTN_A) {
             ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
