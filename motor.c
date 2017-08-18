@@ -49,14 +49,13 @@ extern int optind, opterr, optopt;
 #define RSENSOR_PIN 6
 
 #define DISTMIN 50  /* distancia en cm a la que entendemos que hay un obstáculo */
-#define INITIAL_SPEED 50 /* Entre 0 y 100 */
+#define INITIAL_SPEED 50 /* Entre 0 y 100% */
 
 #define DISPLAY_I2C 0x3C  /* Puerto i2c del display SSD1306 */
 
 void* play_wav(void *filename);  // Función en fichero sound.c
 void setupSound(int gpio);
 void setVolume(unsigned int volume);
-volatile bool playing_audio, cancel_audio;  // Variables compartidas con fichero sound.c
 
 void speedSensor(int gpio, int level, uint32_t tick);
 void wmScan(int gpio, int level, uint32_t tick);
@@ -90,12 +89,13 @@ typedef struct {
 
 volatile uint32_t distancia = UINT32_MAX;
 volatile int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
+volatile int soundVolume = 96;  // 0 - 100%
 volatile int powerState = PI_ON;
-volatile bool esquivando;
+volatile bool esquivando; // tareas sincronizadas por el semáforo semaphore
+volatile bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
 
 sem_t semaphore;
-bool remoteOnly, useEncoder, checkBattery, softTurn;
-int soundVolume = 96;  // 0 - 100%
+bool remoteOnly, useEncoder, checkBattery, softTurn; // program line options
 char *alarmFile = "sounds/police.wav";
 MandoWii_t mando;
 
@@ -280,9 +280,9 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            //printf("%s\n", str);
            oledWriteString(0, 0, str, false);
            if (!remoteOnly && distancia < DISTMIN && !esquivando) {
-                esquivando = true;
-                i = sem_post(&semaphore);  // indica a main que hay un obstáculo delante
-                if (i) perror("Error al activar semáforo");
+               esquivando = true;
+               i = sem_post(&semaphore);  // indica a main que hay un obstáculo delante
+               if (i) perror("Error al activar semáforo");
            }
            break;
  } 
@@ -295,7 +295,7 @@ int setupSonar(void)
    gpioWrite(SONAR_TRIGGER, PI_OFF);
    gpioSetMode(SONAR_ECHO, PI_INPUT);
 
-   /* update sonar several times a second, timer #0 */
+   /* update sonar several times a second */
    if (gpioSetTimerFunc(0, 60, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
         gpioSetAlertFunc(SONAR_ECHO, sonarEcho)) {  /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
@@ -507,15 +507,16 @@ void setupWiimote(void)
     
     if (mando.wiimote) cwiid_close(mando.wiimote);
     cwiid_set_err(wiiErr);
+    mando.wiimote = NULL;
     mando.buttons = 0;
-    oledSetGraph8(15*8, 0, NULL);  // 15: last position in line (0-15)
+    oledSetGraph8(15*8, 0, NULL);  // 15: last position in line (0-15), clear icon
     oledBigMessage(1, "Scan... ");
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
     
     printf("Pulsa las teclas 1 y 2 en el mando de la Wii...\n");
     gpioSleep(PI_TIME_RELATIVE, 2, 0);  // para dar tiempo a desconectar el mando si estaba conectado
     ba = *BDADDR_ANY;
-    wiimote = cwiid_open_timeout(&ba, 0, 5);
+    wiimote = cwiid_open_timeout(&ba, 0, 5);  // 5 seconds timeout
     if (!wiimote ||
         cwiid_set_rpt_mode(wiimote, CWIID_RPT_BTN | CWIID_RPT_STATUS) || 
         cwiid_set_mesg_callback(wiimote, wiiCallback) ||
@@ -538,11 +539,34 @@ void setupWiimote(void)
 }
 
 
+static void* scan_wiimotes(void *arg)
+{
+bool *scanning = (bool*)arg;
+
+    *scanning = true;  // signal to wmScan that scanning is already in place    
+    ajustaMotor(&m_izdo, 0, ADELANTE);  // Para el coche mientras escanea wiimotes
+    ajustaMotor(&m_dcho, 0, ADELANTE);
+    velocidadCoche = INITIAL_SPEED;   // Nueva velocidad inicial, con o sin mando 
+    oledWriteString(0, 1, "    ", false); // Borra mensaje de "Auto", si está           
+    setupWiimote();   
+    if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
+        oledWriteString(0, 1, "Auto", false);
+        ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
+        ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
+    } 
+    *scanning = false;  // signal to wmScan that scanning is over
+    return NULL;
+}
+
+
+
 /* callback llamado cuando el pin WMSCAN_PIN cambia de estado. Tiene un pull-up a VCC, OFF==pulsado */
 void wmScan(int gpio, int level, uint32_t tick)
 {
 static uint32_t time;
 static bool pressed;
+static bool scanning;
+pthread_t pth;
     
     switch (level) {
         case PI_ON:   // Sync button released
@@ -557,18 +581,10 @@ static bool pressed;
                 return; // should never return
             }
             
-            /* Short press: scan wiimotes */
-            ajustaMotor(&m_izdo, 0, ADELANTE);  // Para el coche mientras escanea wiimotes
-            ajustaMotor(&m_dcho, 0, ADELANTE);
-            velocidadCoche = INITIAL_SPEED;   // Nueva velocidad inicial, con o sin mando 
-            oledWriteString(0, 1, "    ", false); // Borra mensaje de "Auto", si está           
-            setupWiimote();   
-            if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
-                oledWriteString(0, 1, "Auto", false);
-                ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
-                ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
-            }
+            /* Short press: scan wiimotes in another thread, in order to return quickly to caller */           
+            if (!scanning && !pthread_create(&pth, NULL, scan_wiimotes, &scanning)) pthread_detach(pth);    
             break;
+            
         case PI_OFF:  // Sync button pressed
             pressed = true;
             time = tick;
@@ -780,19 +796,19 @@ int setup(void)
    
    r |= setupMotor(&m_izdo);
    r |= setupMotor(&m_dcho);
-    
+   r |= sem_init(&semaphore, 0, 0);
+   
    if (powerState == PI_OFF) {
        fprintf(stderr, "La bateria de los motores esta descargada. Coche no arranca!\n");
        terminate(SIGINT);
-   }    
+   }   
 
-   setupWiimote();
+   setupWiimote(); 
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
    
    oledSetInversion(false); // clear display
    r |= setupSonar();
-   r |= sem_init(&semaphore, 0, 0);
    return r;
 }
 
@@ -823,8 +839,7 @@ void main(int argc, char *argv[])
            default:
                fprintf(stderr, "Uso: %s [-r] [-b] [-e] [-s] [-f <fichero de alarma>]\n", argv[0]);
                exit(1);
-     }
-   
+   }
    
    r = setup();
    if (r) {
@@ -845,21 +860,22 @@ void main(int argc, char *argv[])
    
    for (;;) { 
        esquivando = false;  // señala a sonarEcho que ya se puede volver a enviar la señal de obstáculo encontrado
-       r = sem_wait(&semaphore);   // bloquea hasta que encontremos un obstáculo
+       r = sem_wait(&semaphore);   // bloquea hasta que encontremos un obstáculo o haya que escanear wiimotes
        if (r) {
             perror("Error al esperar al semaforo");
             continue;
        }
-       if (remoteOnly) continue;     
-       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;
+             
+       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Enter loop only if A is pressed
+     
+       /* Code gets here when obstacle found and robot is not already avoiding it */
+       oledBigMessage(0, "OBSTACLE");         
        
        // Loop for autonomous mode 
        while (distancia < DISTMIN) {
             //printf("Distancia: %d cm\n", distancia); 
             stopMotor(&m_izdo);
             stopMotor(&m_dcho);
-            oledBigMessage(0, "  STOP  ");
-            //pito(2, 0);  // pita 2 décimas en otro hilo (vuelve inmediatamente)
             gpioSleep(PI_TIME_RELATIVE, 1, 0);
        
             // No esquiva si ya no pulsamos A
@@ -872,8 +888,9 @@ void main(int argc, char *argv[])
             stopMotor(&m_izdo);
             stopMotor(&m_dcho);
        }
+       
        oledBigMessage(0, NULL);
-       // Hemos esquivado el obstáculo, ahora velocidad normal si A está pulsada
+       // Hemos esquivado el obstáculo, ahora velocidad normal si A está pulsada o coche es autonomo
        if (!mando.wiimote || mando.buttons&CWIID_BTN_A) {
             ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
             ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);
