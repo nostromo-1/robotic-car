@@ -36,7 +36,7 @@ extern int optind, opterr, optopt;
 
 #define SONAR_TRIGGER 23
 #define SONAR_ECHO    24
-#define NUMPOS 2     /* Número de medidas de posición promediadas en distancia */
+#define NUMPOS 3     /* Número de medidas de posición promediadas en distancia */
 #define NUMHOLES 21  /* Número de agujeros en discos de encoder del motor */
 
 #define PITO_PIN 26
@@ -47,6 +47,7 @@ extern int optind, opterr, optopt;
 #define AMPLI_PIN 25
 #define LSENSOR_PIN 5
 #define RSENSOR_PIN 6
+#define KARR_PIN 4
 
 #define DISTMIN 50  /* distancia en cm a la que entendemos que hay un obstáculo */
 #define INITIAL_SPEED 50 /* Entre 0 y 100% */
@@ -64,11 +65,12 @@ void wmScan(int gpio, int level, uint32_t tick);
 /****************** Variables y tipos globales **************************/
 
 typedef enum {ADELANTE, ATRAS} Sentido_t;
+
 typedef struct {
     const unsigned int en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
-    Sentido_t sentido;   /* ADELANTE, ATRAS */
-    int velocidad;       /* 0 a 100, velocidad (no real) impuesta al motor */
-    int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100 */
+    volatile Sentido_t sentido;   /* ADELANTE, ATRAS */
+    volatile int velocidad;       /* 0 a 100, velocidad (no real) impuesta al motor */
+    volatile int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100 */
     volatile uint32_t counter, tick, rpm;
     pthread_mutex_t mutex;
 } Motor_t;
@@ -76,15 +78,21 @@ typedef struct {
 
 typedef struct {
     cwiid_wiimote_t *wiimote;
-    uint16_t buttons;
+    volatile uint16_t buttons;
 } MandoWii_t;
 
 
 typedef struct {
-    bool pitando;
     const unsigned int pin;
+    volatile bool pitando;
     pthread_mutex_t mutex;
 } Bocina_t;
+
+
+typedef struct {
+    const unsigned int trigger_pin, echo_pin;
+    volatile bool triggered;
+} Sonar_t;
 
 
 volatile uint32_t distancia = UINT32_MAX;
@@ -93,6 +101,7 @@ volatile int soundVolume = 96;  // 0 - 100%
 volatile int powerState = PI_ON;
 volatile bool esquivando; // tareas sincronizadas por el semáforo semaphore
 volatile bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
+volatile int karr_delay = 150000;  // Time in us to wait between leds in KARR scan
 
 sem_t semaphore;
 bool remoteOnly, useEncoder, checkBattery, softTurn; // program line options
@@ -105,6 +114,13 @@ Bocina_t bocina = {
     .pin = PITO_PIN,
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
+
+Sonar_t sonar = {
+    .triggered = false,
+    .trigger_pin = SONAR_TRIGGER,
+    .echo_pin = SONAR_ECHO
+};
+
 
 Motor_t m_izdo = {
     .en_pin = MI_ENA,
@@ -234,9 +250,10 @@ int setupMotor(Motor_t *motor)
 /* trigger a sonar reading */
 void sonarTrigger(void)
 {
-   gpioWrite(SONAR_TRIGGER, PI_ON);
+   gpioWrite(sonar.trigger_pin, PI_ON);
    gpioDelay(10);     /* 10us trigger pulse */
-   gpioWrite(SONAR_TRIGGER, PI_OFF);
+   gpioWrite(sonar.trigger_pin, PI_OFF);
+   sonar.triggered = true;
 }
 
 
@@ -246,16 +263,26 @@ void sonarEcho(int gpio, int level, uint32_t tick)
    static uint32_t startTick, endTick;
    static uint32_t distance_array[NUMPOS], pos_array=0;
    uint32_t diffTick, d;
-   uint32_t i, suma;
+   uint32_t suma;
    static int firstTime=0;
+   static bool false_echo;
    char str[17];
+   int i;
+  
+   switch (level) {
+   case PI_ON: 
+           if (sonar.triggered) {    
+               startTick = tick;
+               false_echo = false;
+           }
+           else {   // False echo
+              //printf("False echo\n");
+              false_echo = true;
+           }
+           return;  // Not break; should not execute further after this switch
 
- switch (level) {
- case PI_ON: 
-           startTick = tick;
-           break;
-
- case PI_OFF: 
+   case PI_OFF: 
+           if (false_echo) return;  // Not break
            endTick = tick;
            diffTick = endTick - startTick;  // pulse length in microseconds
            if (diffTick > 25000 || diffTick < 60) break;  /* out of range */
@@ -277,27 +304,28 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            for (i=0, suma=0; i<NUMPOS; i++) suma += distance_array[i]; 
            distancia = suma/NUMPOS;   /* La variable de salida, global */
            snprintf(str, sizeof(str), "Dist (cm): %-3u", distancia);
-           //printf("%s\n", str);
            oledWriteString(0, 0, str, false);
            if (!remoteOnly && distancia < DISTMIN && !esquivando) {
                esquivando = true;
-               i = sem_post(&semaphore);  // indica a main que hay un obstáculo delante
+               i = sem_post(&semaphore);  // indica al loop de main que hay un obstáculo delante
                if (i) perror("Error al activar semáforo");
            }
            break;
- } 
+   } 
+   // Only executed after PI_OFF
+   sonar.triggered = false;
 }
 
 
 int setupSonar(void)
 {
-   gpioSetMode(SONAR_TRIGGER, PI_OUTPUT);
-   gpioWrite(SONAR_TRIGGER, PI_OFF);
-   gpioSetMode(SONAR_ECHO, PI_INPUT);
+   gpioSetMode(sonar.trigger_pin, PI_OUTPUT);
+   gpioWrite(sonar.trigger_pin, PI_OFF);
+   gpioSetMode(sonar.echo_pin, PI_INPUT);
 
    /* update sonar several times a second */
    if (gpioSetTimerFunc(0, 60, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
-        gpioSetAlertFunc(SONAR_ECHO, sonarEcho)) {  /* monitor sonar echos */
+        gpioSetAlertFunc(sonar.echo_pin, sonarEcho)) {  /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
         return -1;
        }
@@ -392,7 +420,7 @@ void audioplay(char *file, int modo)
 /****************** Funciones del Wiimote **************************/
 void wiiErr(cwiid_wiimote_t *wiimote, const char *s, va_list ap)
 {
-  if (wiimote) printf("Wiimote %d:", cwiid_get_id(wiimote)); else printf("-1:");
+  if (wiimote) fprintf(stderr, "Wiimote %d:", cwiid_get_id(wiimote)); else fprintf(stderr, "Wiimote:");
   vprintf(s, ap);
   printf("\n");
 }
@@ -427,6 +455,8 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                     cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
                 }
             }
+            
+            /*** Botones + y - junto con botón ´1´ ***/
             if (previous_buttons&CWIID_BTN_MINUS && ~mando.buttons&CWIID_BTN_MINUS) {
                  if (mando.buttons&CWIID_BTN_1) { /* baja volumen: buttons ´1´ + ´-´ */
                     soundVolume -= 2;
@@ -440,7 +470,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                 }
             }
             
-            /*** Botones A, B y RIGHT, LEFT; si estamos esquivando, controla el loop de main ***/
+            /*** Botones A, B y RIGHT, LEFT; si estamos esquivando, sale: el loop de main tiene el control ***/
             if (!esquivando) {
                 /*** Botones A y B, leen la variable global "velocidadCoche" ***/
                 if (mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
@@ -492,7 +522,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
             break;
             
         default:
-            printf("Mensaje desconocido del wiimote!!\n");
+            fprintf(stderr, "Mensaje desconocido del wiimote!!\n");
             break;
         }
     }
@@ -539,7 +569,7 @@ void setupWiimote(void)
 }
 
 
-static void* scan_wiimotes(void *arg)
+static void* scanWiimotes(void *arg)
 {
 bool *scanning = (bool*)arg;
 
@@ -582,7 +612,7 @@ pthread_t pth;
             }
             
             /* Short press: scan wiimotes in another thread, in order to return quickly to caller */           
-            if (!scanning && !pthread_create(&pth, NULL, scan_wiimotes, &scanning)) pthread_detach(pth);    
+            if (!scanning && !pthread_create(&pth, NULL, scanWiimotes, &scanning)) pthread_detach(pth);    
             break;
             
         case PI_OFF:  // Sync button pressed
@@ -740,6 +770,40 @@ void getPowerState(void)
 }
 
 
+/* Thread in charge of sending a clock pulse to the circuit implementing the KARR scan effect.
+At each LH transition, the led will change */
+static void* karrScan(void *arg)
+{
+static int clock_state;    
+
+for (;;) {    
+    switch (clock_state) {
+        case PI_ON: gpioSleep(PI_TIME_RELATIVE, 0, 100);  // set high state for clock during 100 us 
+                    gpioWrite(KARR_PIN, PI_OFF); 
+                    clock_state = PI_OFF;
+                    break;
+                 
+        case PI_OFF: gpioSleep(PI_TIME_RELATIVE, 0, karr_delay);
+                     gpioWrite(KARR_PIN, PI_ON);  // LH clock transition changes led
+                     clock_state = PI_ON;
+                     break;
+    }   
+}   
+}
+
+
+
+/* Activa el efecto scanner de los leds delanteros, como KARR */
+void activateKarr(void)
+{
+pthread_t pth;
+    
+    gpioSetMode(KARR_PIN, PI_OUTPUT);
+    gpioWrite(KARR_PIN, PI_OFF);    
+    if (!pthread_create(&pth, NULL, karrScan, NULL)) pthread_detach(pth);   
+}
+
+
 
 /* Para el coche, cierra todo y termina el programa */
 void terminate(int signum)
@@ -754,7 +818,8 @@ void terminate(int signum)
    gpioWrite(bocina.pin, PI_OFF);
    gpioSetMode(AUDR_PIN, PI_INPUT);
    gpioSetMode(AMPLI_PIN, PI_INPUT);
-
+   gpioSetMode(KARR_PIN, PI_INPUT);
+    
    oledShutdown();
    gpioTerminate();
    exit(1);
@@ -807,6 +872,7 @@ int setup(void)
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
    
+   activateKarr();  // start KARR scanner effect
    oledSetInversion(false); // clear display
    r |= setupSonar();
    return r;
