@@ -30,10 +30,10 @@ Based on the following original code:
 #include <pigpio.h>
 
 #include "oled96.h"
+#include "fonts.c"
 
 #define I2C_BUS 1   // Bus 0 for Rev 1 boards, bus 1 for newer boards
 
-extern uint8_t ucFont[];
 static int iScreenOffset; // current write offset of screen data
 static uint8_t ucScreen[1024]; // local copy of the image buffer
 static int i2c_handle = -1;
@@ -42,10 +42,10 @@ static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static void oledWriteCommand(uint8_t);
 static void oledWriteCommand2(uint8_t c, uint8_t d);
 static void oledSetPosition(int x, int y);
-static void oledWriteDataBlock(uint8_t *ucBuf, int iLen);
+static void oledWriteDataBlock(const uint8_t *ucBuf, int iLen);
 static void RotateFont90(void);
 
-// Opens a file system handle to the I2C device
+// Opens a handle to the I2C device using pigpio library
 // Initializes the OLED controller into "page mode"
 // Prepares the font data for the orientation of the display
 int oledInit(int iAddr)
@@ -70,7 +70,7 @@ uint8_t initbuf[]={0x00,0xae,0xa8,0x3f,0xd3,0x00,0x40,0xa0,0xa1,0xc0,0xc8,
     oledFill(0);    // Set display memory to zero   
     oledWriteCommand(0xAF);  // turn on OLED
     oledSetContrast(30);
-   	RotateFont90(); // fix font orientation for OLED
+    RotateFont90(); // fix font orientation for OLED
     return 0;    
 } /* oledInit() */
 
@@ -109,11 +109,11 @@ static void oledWriteCommand2(uint8_t c, uint8_t d)
 
 int oledSetContrast(uint8_t ucContrast)
 {
-    if (i2c_handle < 0) return -1;
+   if (i2c_handle < 0) return -1;
 
-    pthread_mutex_lock(&mutex);
+   pthread_mutex_lock(&mutex);
 	oledWriteCommand2(0x81, ucContrast);
-    pthread_mutex_unlock(&mutex);
+   pthread_mutex_unlock(&mutex);
 	return 0;
 } /* oledSetContrast() */
 
@@ -122,9 +122,11 @@ int oledSetContrast(uint8_t ucContrast)
 int oledSetInversion(bool invert)
 {
     if (i2c_handle < 0) return -1;
-        
+
+    pthread_mutex_lock(&mutex);    
     if (invert == false) oledWriteCommand(0xA6);
     else oledWriteCommand(0xA7);
+    pthread_mutex_unlock(&mutex);
     return 0;
 }
 
@@ -147,7 +149,7 @@ static void oledSetPosition(int x, int y)
 
 // Write a block of pixel data to the OLED
 // Length can be anything from 1 to 128 (whole line)
-static void oledWriteDataBlock(uint8_t *ucBuf, int iLen)
+static void oledWriteDataBlock(const uint8_t *ucBuf, int iLen)
 {
 uint8_t ucTemp[129];
 int rc, rest;
@@ -200,30 +202,30 @@ uint8_t uc, ucOld;
 	uc &= ~(0x1 << (y & 7));
 	if (ucColor) uc |= (0x1 << (y & 7));
 	if (uc != ucOld) {  // pixel changed
-        pthread_mutex_lock(&mutex);
+      pthread_mutex_lock(&mutex);
 		oledSetPosition(x, y>>3);
 		oledWriteDataBlock(&uc, 1);
-        pthread_mutex_unlock(&mutex);
+      pthread_mutex_unlock(&mutex);
 	}
     return 0;
 } /* oledSetPixel() */
 
 // Draw a string of small (8x8) or large (16x24) characters
 // At the given col+row
-int oledWriteString(int x, int y, char *szMsg, bool bLarge)
+int oledWriteString(int x, int y, const char *szMsg, bool bLarge)
 {
 int i, j, iLen;
-uint8_t *s;
+const uint8_t *s;
 
 	if (i2c_handle < 0) return -1; 
-    if (y<0 || y>7 || x<0 || x>127) {
-        fprintf(stderr, "oledWriteString: Invalid coordinates for display\n");
-        return -1;
-    }
-    if (!szMsg) {
-        fprintf(stderr, "oledWriteString: Invalid string\n");
-        return -1;    
-    }
+   if (y<0 || y>7 || x<0 || x>127) {
+       fprintf(stderr, "oledWriteString: Invalid coordinates for display\n");
+       return -1;
+   }
+   if (!szMsg) {
+       fprintf(stderr, "oledWriteString: Invalid string\n");
+       return -1;    
+   }
     
 	iLen = strlen(szMsg);
 	if (bLarge) {  // draw 16x24 font, 8 characters per line
@@ -238,13 +240,13 @@ uint8_t *s;
         }
 	}
 	else {  // draw 8x8 font, 16 characters per line
-        pthread_mutex_lock(&mutex);
+      pthread_mutex_lock(&mutex);
 		oledSetPosition(x, y);
 		for (i=0; i<iLen; i++) {
 			s = &ucFont[(uint8_t)szMsg[i]*8];
 			oledWriteDataBlock(s, 8); // write character pattern
 		}	
-        pthread_mutex_unlock(&mutex);
+      pthread_mutex_unlock(&mutex);
 	}
 
 	return 0;
@@ -253,23 +255,23 @@ uint8_t *s;
 
 // Write an 8x8 bitmap to display
 // graph is an 8 byte array, glyph must be turned 90 degrees to the right
-int oledSetGraph8(int x, int y, uint8_t* graph)
+int oledSetGraph8(int x, int y, const uint8_t* graph)
 {
-    static uint8_t empty[] = {0, 0, 0, 0, 0, 0, 0, 0};  // empty space
-    uint8_t *buf;
+   static const uint8_t empty[] = {0, 0, 0, 0, 0, 0, 0, 0};  // empty space
+   const uint8_t *buf;
     
 	if (i2c_handle < 0) return -1; 
-    if (y<0 || y>7 || x<0 || x>127) {
-        fprintf(stderr, "oledSetGraph8: Invalid coordinates for display\n");
-        return -1;
-    }
-    if (graph) buf = graph;
-    else buf = empty;
+   if (y<0 || y>7 || x<0 || x>127) {
+       fprintf(stderr, "oledSetGraph8: Invalid coordinates for display\n");
+       return -1;
+   }
+   if (graph) buf = graph;
+   else buf = empty;
     
-    pthread_mutex_lock(&mutex);
-    oledSetPosition(x, y);
-    oledWriteDataBlock(buf, 8);
-    pthread_mutex_unlock(&mutex);
+   pthread_mutex_lock(&mutex);
+   oledSetPosition(x, y);
+   oledWriteDataBlock(buf, 8);
+   pthread_mutex_unlock(&mutex);
 	return 0;
 } 
 
@@ -285,16 +287,16 @@ uint8_t temp[128];
 
 	memset(temp, ucData, 128);
 	for (y=0; y<8; y++) {
-        pthread_mutex_lock(&mutex);
+      pthread_mutex_lock(&mutex);
 		oledSetPosition(0, y); // set to (0,Y)
 		oledWriteDataBlock(temp, 128); // fill with data byte
-        pthread_mutex_unlock(&mutex);
+      pthread_mutex_unlock(&mutex);
 	} // for y
     
 	return 0;
 } /* oledFill() */
 
-// Fix the orientation of the font image data
+// Fix the orientation of the font image data, defined in fonts.c
 static void RotateFont90(void)
 {
 uint8_t ucTemp[64];

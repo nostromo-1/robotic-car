@@ -25,7 +25,7 @@ int oledFill(uint8_t ucPattern);
 
 // Write a text string to the display at x (column 0-127) and y (row 0-7)
 // bLarge = 0 - 8x8 font, bLarge = 1 - 16x24 font
-int oledWriteString(int x, int y, char *szText, bool bLarge);
+int oledWriteString(int x, int y, const char *szText, bool bLarge);
 
 // Sets a pixel to On (1) or Off (0)
 // Coordinate system is pixels, not text rows (0-127, 0-63)
@@ -41,7 +41,7 @@ int oledSetInversion(bool invert);
 
 // Write an 8x8 bitmap to display
 // graph is an 8 byte array, glyph must be turned 90 degrees to the right
-int oledSetGraph8(int x, int y, uint8_t *graph);
+int oledSetGraph8(int x, int y, const uint8_t *graph);
 
 
 #endif // OLED96_H

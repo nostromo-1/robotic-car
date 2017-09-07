@@ -13,6 +13,6 @@ AUDIOLIBS = -lasound
 
 
 
-robot: motor.o sound.o
+robot: motor.o sound.o oled96.o 
 	$(CC) -o $@ $^ $(CFLAGS) $(PIOLIBS) $(BTLIBS) $(AUDIOLIBS)	
 
