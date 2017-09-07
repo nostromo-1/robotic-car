@@ -260,10 +260,8 @@ void sonarTrigger(void)
 /* callback llamado cuando el pin SONAR_ECHO cambia de estado. Ajusta la variable global 'distancia' */
 void sonarEcho(int gpio, int level, uint32_t tick)
 {
-   static uint32_t startTick, endTick;
-   static uint32_t distance_array[NUMPOS], pos_array=0;
-   uint32_t diffTick, d;
-   uint32_t suma;
+   static uint32_t startTick, distance_array[NUMPOS], pos_array=0;
+   uint32_t suma, diffTick, d;
    static int firstTime=0;
    static bool false_echo;
    char str[17];
@@ -276,16 +274,14 @@ void sonarEcho(int gpio, int level, uint32_t tick)
                false_echo = false;
            }
            else {   // False echo
-              //printf("False echo\n");
               false_echo = true;
            }
            return;  // Not break; should not execute further after this switch
 
    case PI_OFF: 
            if (false_echo) return;  // Not break
-           endTick = tick;
-           diffTick = endTick - startTick;  // pulse length in microseconds
-           if (diffTick > 25000 || diffTick < 60) break;  /* out of range */
+           diffTick = tick - startTick;  // pulse length in microseconds
+           if (diffTick > 23000 || diffTick < 60) break;  /* out of range */
            d = (diffTick*17)/1000;  // distance in cm
 
            distance_array[pos_array++] = d;
