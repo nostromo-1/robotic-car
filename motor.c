@@ -36,7 +36,7 @@ extern int optind, opterr, optopt;
 
 #define SONAR_TRIGGER 23
 #define SONAR_ECHO    24
-#define NUMPOS 3     /* Número de medidas de posición promediadas en distancia */
+#define NUMPOS 3     /* Número de medidas de posición del sonar para promediar */
 #define NUMHOLES 21  /* Número de agujeros en discos de encoder del motor */
 
 #define PITO_PIN 26
@@ -49,10 +49,10 @@ extern int optind, opterr, optopt;
 #define RSENSOR_PIN 6
 #define KARR_PIN 4
 
-#define DISTMIN 50  /* distancia en cm a la que entendemos que hay un obstáculo */
-#define INITIAL_SPEED 50 /* Entre 0 y 100% */
+#define DISTMIN 50        /* distancia en cm a la que entendemos que hay un obstáculo */
+#define INITIAL_SPEED 50  /* Entre 0 y 100% */
 
-#define DISPLAY_I2C 0x3C  /* Puerto i2c del display SSD1306 */
+#define DISPLAY_I2C 0x3C  /* Dirección i2c del display SSD1306 */
 
 void* play_wav(void *filename);  // Función en fichero sound.c
 void setupSound(int gpio);
@@ -832,9 +832,7 @@ int setup(void)
    if (gpioInitialise()<0) return 1;
    if (gpioSetSignalFunc(SIGINT, terminate)<0) return 1;
    
-   // Inicializa display. Primero, los pines I2C 2 y 3 del GPIO, el bus i2c
-   gpioSetMode(2, PI_ALT0);   
-   gpioSetMode(3, PI_ALT0);   
+   // Inicializa display
    oledInit(DISPLAY_I2C);
    oledSetInversion(true);   // Fill display, as life sign
       
