@@ -24,7 +24,7 @@ Communication with the robot is achieved via bluetooth (the wiimote) and wifi (s
 * If a button is pressed, it starts scanning for wiimotes and connects to one
 * If a pi-camera is attached, it can be used to display the image in a web browser (using https://github.com/silvanmelchior/RPi_Cam_Web_Interface)
 * It displays messages in a display
-* Battery: 6 AA rechargeable NiMH for the motor and electronics, a 5V power bank for the raspberry pi. I prefer to use separate power supplies, though a single one could be used.
+* Battery: 2 batteries type 18650 in series, protected. I use 2600 mAh Nitecore. The 5V supply for the Pi comes from a switching regulator. I use the [S7V7F5](https://www.pololu.com/product/2119).
 
 ## Parts
 The following parts are needed to build it:
