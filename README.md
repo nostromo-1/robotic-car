@@ -6,6 +6,8 @@ It is a 4WD or 2WD car, with a raspberry pi as MCU, and controlled by a wiimote.
 It adds some external electronics.
 Communication with the robot is achieved via bluetooth (the wiimote) and wifi (start/stop program, error and status messages).
 
+[![Robotic car](https://github.com/nostromo-1/robotic-car/blob/master/photos/robotcar.jpg)](https://github.com/nostromo-1/robotic-car)
+
 ## Features
 * 4WD or 2WD robotic car
 * It can operate under the control of a Wiimote or in autonomous mode
