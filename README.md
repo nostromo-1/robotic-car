@@ -29,7 +29,7 @@ Communication with the robot is achieved via bluetooth (the wiimote) and wifi (s
 ## Parts
 The following parts are needed to build it:
 * Car chasis. For example, http://www.leantec.es/robotica/59-kit-robot-de-4-ruedas-con-ultrasonido.html
-* 4 motors (if 4WD) or 2 motors (if 2WD)
+* 4 6V DC motors (if 4WD) or 2 motors (if 2WD)
 * Motor controller: a L298N based circuit board, like http://www.leantec.es/motores-y-controladores/82-l298-controlador-de-motores-con-doble-puente-h.html
 * Distance sensor HC-SR04
 * Display module SSD1306 (like https://www.sunfounder.com/oled-ssd1306-module.html)
