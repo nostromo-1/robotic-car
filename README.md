@@ -36,7 +36,7 @@ The following parts are needed to build it:
 * A Raspberry pi. I use a Raspberry Pi 3 Model B, it has built-in bluetooth and wifi. You can also use a Raspberry Pi Zero with a USB hub (like https://shop.pimoroni.com/products/zero4u), a wifi dongle and a bluetooth dongle. Or the newly released Pi Zero W!
 * Transistors, capacitors, resistors, push button and LED for voltage checker and scan button. A 6V buzzer. The schematics can be seen in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche.pdf
 * For the audio amplifier: a LM386 integrated circuit, an 8 ohm small speaker and some resistors and capacitors. The schematics are in https://github.com/nostromo-1/robotic-car/blob/master/schematics/Esquema-coche%20ampli.pdf. The audio signal is taken from the GPIO, it does not use the audio output jack, so it also works on a Raspberry Pi Zero.
-* Power supply: two 18650 type batteries in series, protected. I use 2600 mAh Nitecore. The 5V supply for the Pi comes from a switching regulator. I use the [S7V7F5](https://www.pololu.com/product/2119).
+* Power supply: two 18650 type batteries in series, protected. I use 2600 mAh Nitecore. The 5V supply for the Pi comes from a switching regulator. I use the [S7V7F5](https://www.pololu.com/product/2119). Alternatively, you can use 6 NiMH AA batteries.
 
 ## Software
 The robot runs on raspbian, I have tested it on the releases from mid 2016. It is programmed in C. It makes use of the pigpio library (http://abyz.co.uk/rpi/pigpio/) for GPIO access, allowing it to play sound and use PWM at the same time. It also needs the bluetooth and alsa libraries.
