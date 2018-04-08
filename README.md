@@ -1,15 +1,15 @@
 # Robotic Car
-Project of a robotic car with raspberry pi as control unit
+Project of a robotic car with Raspberry Pi as control unit
 
 This project is about building a hobby robotic car.
 It is a 4WD or 2WD car, with a raspberry pi as MCU, and controlled by a wiimote.
-It adds some external electronics.
+It needs some external electronics.
 Communication with the robot is achieved via bluetooth (the wiimote) and wifi (start/stop program, error and status messages).
 
 [![Robotic car](https://github.com/nostromo-1/robotic-car/blob/master/photos/robotcar.jpg)](https://github.com/nostromo-1/robotic-car)
 
 ## Features
-* 4WD or 2WD robotic car
+* 4WD or 2WD robotic car (depending on chasis)
 * It can operate under the control of a Wiimote or in autonomous mode
 * The Wiimote can be used to:
   * Move forward (A button) or backward (B button)
