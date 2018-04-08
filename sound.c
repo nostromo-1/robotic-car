@@ -20,6 +20,8 @@ Reproduce un fichero de audio en formato WAV
 #include <pigpio.h>
 #include <alsa/asoundlib.h>
 
+#include "sound.h"
+
 #define PCM_DEVICE "default"
 #define MIXER_DEVICE "PCM"
 #define NUMBER32(p) (*(p) + (*((p)+1)<<8) + (*((p)+2)<<16) + (*((p)+3)<<24))

@@ -22,10 +22,14 @@ Realiza el control principal del coche
 #include <pigpio.h>
 #include <cwiid.h>
 #include "oled96.h"
+#include "sound.h"
+#include "pcf8591.h"
+
 
 extern char *optarg;
 extern int optind, opterr, optopt;
 
+/************ Define pin numbers (Broadcom pin number scheme) *********************/
 #define MI_ENA 17
 #define MI_IN1 27
 #define MI_IN2 22
@@ -36,28 +40,33 @@ extern int optind, opterr, optopt;
 
 #define SONAR_TRIGGER 23
 #define SONAR_ECHO    24
+
+#define PITO_PIN   26
+#define VBAT_PIN   19
+#define WMSCAN_PIN 12
+#define AUDR_PIN   18
+#define AUDR_ALT PI_ALT5   /* ALT function for audio pin, ALT5 for pin 18 */
+#define AMPLI_PIN  25
+#define LSENSOR_PIN 5
+#define RSENSOR_PIN 6
+#define KARR_PIN    4
+
+
+/***************** Define constants and parameters ****************/
+#define DISTMIN 50        /* distancia en cm a la que entendemos que hay un obstáculo */
+#define INITIAL_SPEED 50  /* Entre 0 y 100% */
 #define NUMPOS 3     /* Número de medidas de posición del sonar para promediar */
 #define NUMHOLES 21  /* Número de agujeros en discos de encoder del motor */
 
-#define PITO_PIN 26
-#define VBAT_PIN 19
-#define WMSCAN_PIN 12
-#define AUDR_PIN 18
-#define AUDR_ALT PI_ALT5   /* ALT function for audio pin, ALT5 for pin 18 */
-#define AMPLI_PIN 25
-#define LSENSOR_PIN 5
-#define RSENSOR_PIN 6
-#define KARR_PIN 4
+#define PCF8591_I2C 0x48           /* Dirección i2c del PCF8591 (AD/DA converter) */
+#define DISPLAY_I2C 0x3C           /* Dirección i2c del display SSD1306 */
+#define LSM9DS1_GYR_ACEL_I2C 0x6B  /* Dirección i2c del módulo acelerómetro/giroscopio del IMU LSM9DS1 */
+#define LSM9DS1_MAG_I2C 0x1E       /* Dirección i2c del módulo magnetómetro del IMU LSM9DS1 */
 
-#define DISTMIN 50        /* distancia en cm a la que entendemos que hay un obstáculo */
-#define INITIAL_SPEED 50  /* Entre 0 y 100% */
 
-#define DISPLAY_I2C 0x3C  /* Dirección i2c del display SSD1306 */
 
-void* play_wav(void *filename);  // Función en fichero sound.c
-void setupSound(int gpio);
-void setVolume(unsigned int volume);
 
+/* Callbacks called when some GPIO pin changes */
 void speedSensor(int gpio, int level, uint32_t tick);
 void wmScan(int gpio, int level, uint32_t tick);
 
@@ -92,7 +101,8 @@ typedef struct {
 typedef struct {
     const unsigned int trigger_pin, echo_pin;
     volatile bool triggered;
-} Sonar_t;
+    volatile uint32_t distancia;
+} SonarHCSR04_t;
 
 
 volatile uint32_t distancia = UINT32_MAX;
@@ -104,7 +114,7 @@ volatile bool playing_audio, cancel_audio;   // Variables compartidas con ficher
 volatile int karr_delay = 150000;  // Time in us to wait between leds in KARR scan
 
 sem_t semaphore;
-bool remoteOnly, useEncoder, checkBattery, softTurn; // program line options
+bool remoteOnly, useEncoder, checkBattery, softTurn, calibrateIMU; // program line options
 char *alarmFile = "sounds/police.wav";
 MandoWii_t mando;
 
@@ -115,10 +125,11 @@ Bocina_t bocina = {
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
-Sonar_t sonar = {
-    .triggered = false,
+SonarHCSR04_t sonarHCSR04 = {
     .trigger_pin = SONAR_TRIGGER,
-    .echo_pin = SONAR_ECHO
+    .echo_pin = SONAR_ECHO,
+    .distancia = UINT32_MAX,
+    .triggered = false
 };
 
 
@@ -178,7 +189,7 @@ void ajustaSentido(Motor_t *motor, Sentido_t dir)
 }
 
 
-void stopMotor(Motor_t *motor)
+void fastStopMotor(Motor_t *motor)
 {
     pthread_mutex_lock(&motor->mutex);
     gpioWrite(motor->in1_pin, PI_OFF);
@@ -214,8 +225,7 @@ void rota(Motor_t *izdo, Motor_t *dcho, int sentido)
     if (sentido>0) {  // sentido horario
        ajustaMotor(izdo, softTurn?50:100, ADELANTE);
        ajustaMotor(dcho, softTurn?0:100, ATRAS);
-    }
-    else{
+    } else{
        ajustaMotor(dcho, softTurn?50:100, ADELANTE);
        ajustaMotor(izdo, softTurn?0:100, ATRAS);
     }    
@@ -250,10 +260,10 @@ int setupMotor(Motor_t *motor)
 /* trigger a sonar reading */
 void sonarTrigger(void)
 {
-   gpioWrite(sonar.trigger_pin, PI_ON);
+   gpioWrite(sonarHCSR04.trigger_pin, PI_ON);
    gpioDelay(10);     /* 10us trigger pulse */
-   gpioWrite(sonar.trigger_pin, PI_OFF);
-   sonar.triggered = true;
+   gpioWrite(sonarHCSR04.trigger_pin, PI_OFF);
+   sonarHCSR04.triggered = true;
 }
 
 
@@ -261,21 +271,19 @@ void sonarTrigger(void)
 void sonarEcho(int gpio, int level, uint32_t tick)
 {
    static uint32_t startTick, distance_array[NUMPOS], pos_array=0;
-   uint32_t suma, diffTick, d;
+   static uint32_t distancia_previa = UINT32_MAX;
    static int firstTime=0;
    static bool false_echo;
+   uint32_t suma, diffTick, d;
    char str[17];
    int i;
   
    switch (level) {
    case PI_ON: 
-           if (sonar.triggered) {    
+           if (sonarHCSR04.triggered) {    
                startTick = tick;
                false_echo = false;
-           }
-           else {   // False echo
-              false_echo = true;
-           }
+           } else false_echo = true;
            return;  // Not break; should not execute further after this switch
 
    case PI_OFF: 
@@ -289,18 +297,24 @@ void sonarEcho(int gpio, int level, uint32_t tick)
  
            if (firstTime>=0) {
               if (firstTime < NUMPOS) { /* The first NUMPOS times until array is filled */
-                  distancia = d;
+                  //distancia = d;
                   firstTime++;
                   break;
-              }
-              else firstTime = -1;  /* Initialisation is over */
+              } else firstTime = -1;  /* Initialisation is over */
            }
            
            /* Calculate moving average */
            for (i=0, suma=0; i<NUMPOS; i++) suma += distance_array[i]; 
-           distancia = suma/NUMPOS;   /* La variable de salida, global */
-           snprintf(str, sizeof(str), "Dist (cm): %-3u", distancia);
-           oledWriteString(0, 0, str, false);
+           sonarHCSR04.distancia = suma/NUMPOS;   
+           
+           /* Set global variable "distancia" and activate main loop if below threshold */
+           distancia = sonarHCSR04.distancia;  
+           if (distancia != distancia_previa) {
+               snprintf(str, sizeof(str), "Dist (cm): %-3u", distancia);
+               oledWriteString(0, 0, str, false);
+               distancia_previa = distancia;
+           }
+           
            if (!remoteOnly && distancia < DISTMIN && !esquivando) {
                esquivando = true;
                i = sem_post(&semaphore);  // indica al loop de main que hay un obstáculo delante
@@ -309,25 +323,32 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            break;
    } 
    // Only executed after PI_OFF
-   sonar.triggered = false;
+   sonarHCSR04.triggered = false;
 }
 
 
-int setupSonar(void)
+int setupSonarHCSR04(void)
 {
-   gpioSetMode(sonar.trigger_pin, PI_OUTPUT);
-   gpioWrite(sonar.trigger_pin, PI_OFF);
-   gpioSetMode(sonar.echo_pin, PI_INPUT);
+   gpioSetMode(sonarHCSR04.trigger_pin, PI_OUTPUT);
+   gpioWrite(sonarHCSR04.trigger_pin, PI_OFF);
+   gpioSetMode(sonarHCSR04.echo_pin, PI_INPUT);
 
    /* update sonar several times a second */
    if (gpioSetTimerFunc(0, 60, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
-        gpioSetAlertFunc(sonar.echo_pin, sonarEcho)) {  /* monitor sonar echos */
+        gpioSetAlertFunc(sonarHCSR04.echo_pin, sonarEcho)) {  /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
         return -1;
        }
    return 0;
 }
 
+
+void closeSonarHCSR04(void)
+{
+   gpioSetTimerFunc(0, 60, NULL);
+   gpioSetAlertFunc(sonarHCSR04.echo_pin, NULL);
+   gpioSetMode(sonarHCSR04.trigger_pin, PI_INPUT);
+}
 
 
 /****************** Funciones de la bocina **************************/
@@ -383,8 +404,7 @@ void pito(uint32_t decimas, int modo)
             return;
         }
         pthread_detach(pth);
-    }
-    else duerme_pitando(pd);
+    } else duerme_pitando(pd);
 }
 
 
@@ -406,7 +426,7 @@ void audioplay(char *file, int modo)
         return;
     }
     if (pthread_create(&pth, NULL, play_wav, file)) return;
-    if (modo == 0) pthread_detach(pth);
+    if (modo == 0) pthread_detach(pth); 
     else pthread_join(pth, NULL);    
 }
 
@@ -416,7 +436,8 @@ void audioplay(char *file, int modo)
 /****************** Funciones del Wiimote **************************/
 void wiiErr(cwiid_wiimote_t *wiimote, const char *s, va_list ap)
 {
-  if (wiimote) fprintf(stderr, "Wiimote %d:", cwiid_get_id(wiimote)); else fprintf(stderr, "Wiimote:");
+  if (wiimote) fprintf(stderr, "Wiimote %d:", cwiid_get_id(wiimote)); 
+  else fprintf(stderr, "Wiimote:");
   vprintf(s, ap);
   printf("\n");
 }
@@ -437,15 +458,17 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
         switch (mesg[i].type) {
         case CWIID_MESG_BTN:  // Change in buttons
             mando.buttons = mesg[i].btn_mesg.buttons;
-                       
+
+            // Save data from accelerometer in a file. Start and end saving when '2' is pressed
+            if (previous_buttons&CWIID_BTN_2 && ~mando.buttons&CWIID_BTN_2) save_accel_data();
+
             /*** Botones + y - ***/           
             if (previous_buttons&CWIID_BTN_PLUS && ~mando.buttons&CWIID_BTN_PLUS) {
                 if (mando.buttons&CWIID_BTN_1) { /* sube volumen: buttons ´1´ + ´+´ */
                     soundVolume += 2;
                     if (soundVolume > 100) soundVolume = 100;
                     setVolume(soundVolume);
-                }
-                else {  /* ajusta la velocidad del coche y la marca en leds del mando */
+                } else {  /* ajusta la velocidad del coche y la marca en leds del mando */
                     velocidadCoche += 10;
                     if (velocidadCoche > 100) velocidadCoche = 100;
                     cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
@@ -458,8 +481,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                     soundVolume -= 2;
                     if (soundVolume < 0) soundVolume = 0;
                     setVolume(soundVolume);
-                } 
-                else { /* ajusta la velocidad del coche y la marca en leds del mando */
+                } else { /* ajusta la velocidad del coche y la marca en leds del mando */
                     velocidadCoche -= 10;
                     if (velocidadCoche < 0) velocidadCoche = 0;
                     cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
@@ -477,17 +499,18 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                     /*** Botones LEFT y RIGHT, giran el coche ***/
                     if (mando.buttons&CWIID_BTN_RIGHT) {
                         s_dcho = 1 - s_dcho;
-                        if (softTurn) v_dcho = 0; 
-                        v_izdo += softTurn?0:30;
+                        if (softTurn) v_dcho = 0;
+                        else v_dcho = 50;
+                        v_izdo += 20; 
                     } 
             
                     if (mando.buttons&CWIID_BTN_LEFT) {
                         s_izdo = 1 - s_izdo;
                         if (softTurn) v_izdo = 0; 
-                        v_dcho += softTurn?0:30;                
+                        else v_izdo = 50;
+                        v_dcho += 20;                
                     }
-                }
-                else {  // Ni A ni B pulsados
+                } else {  // Ni A ni B pulsados
                     v_izdo = v_dcho = 0;
                     s_izdo = s_dcho = ADELANTE;
                 }
@@ -535,7 +558,7 @@ void setupWiimote(void)
     cwiid_set_err(wiiErr);
     mando.wiimote = NULL;
     mando.buttons = 0;
-    oledSetGraph8(15*8, 0, NULL);  // 15: last position in line (0-15), clear icon
+    oledSetBitmap8x8(15*8, 0, NULL);  // 15: last position in line (0-15), clear icon
     oledBigMessage(1, "Scan... ");
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
     
@@ -557,7 +580,7 @@ void setupWiimote(void)
     mando.wiimote = wiimote;
     printf("Conectado al mando de la Wii\n");
     oledBigMessage(1, NULL);
-    oledSetGraph8(15*8, 0, bluetooth_glyph);
+    oledSetBitmap8x8(15*8, 0, bluetooth_glyph);
     cwiid_set_rumble(wiimote, 1);  // señala mediante zumbido el mando sincronizado
     gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos
     cwiid_set_rumble(wiimote, 0);
@@ -732,22 +755,22 @@ int pv, kp=15;  // parameters of PID filter: pv is measured error (process value
 /* Comprueba si los motores tienen alimentación.
 Devuelve valor de las baterías de alimentación del motor en la variable global powerState: 
 PI_OFF si no hay alimentación o es baja, PI_ON si todo OK
-Toma 3 muestras espaciadas 400 ms, en bucle, hasta que coincidan.
+Toma 3 muestras espaciadas 600 ms, en bucle, hasta que coincidan.
 Esto es necesario porque al arrancar los motores hay un tiempo de oscilación de las baterías, 
 aunque está amortiguado por el condensador del circuito */    
 void getPowerState(void)
 {
-    static uint8_t emptybatt_glyph[] = {0, 0, 254, 131, 131, 254, 0, 0};
-    int power1, power2, power3;
-    int n = 3;
+static uint8_t emptybatt_glyph[] = {0, 0, 254, 131, 131, 254, 0, 0};
+int power1, power2, power3;
+int n = 3;
     
     do {
         power1 = gpioRead(VBAT_PIN);
         if (power1 < 0) return;  // Error al leer, valor inválido
-        gpioSleep(PI_TIME_RELATIVE, 0, 400000);  
+        gpioSleep(PI_TIME_RELATIVE, 0, 600000);  
         power2 = gpioRead(VBAT_PIN);
         if (power2 < 0) return;
-        gpioSleep(PI_TIME_RELATIVE, 0, 400000);  
+        gpioSleep(PI_TIME_RELATIVE, 0, 600000);  
         power3 = gpioRead(VBAT_PIN);
         if (power3 < 0) return;
     } while (power1!=power2 || power2!=power3);
@@ -756,35 +779,38 @@ void getPowerState(void)
     // señal acústica en caso de batería baja
     if (powerState == PI_OFF) {
         oledBigMessage(0, "Bateria!");
-        oledSetGraph8(14*8, 0, emptybatt_glyph);
+        oledSetBitmap8x8(14*8, 0, emptybatt_glyph);
         while(n--) {
             pito(2, 1);  // pita 2 décimas en este hilo (vuelve después de pitar)
             gpioSleep(PI_TIME_RELATIVE, 0, 200000);  // espera 2 décimas de segundo
         }
+        gpioSleep(PI_TIME_RELATIVE, 2, 0);
         oledBigMessage(0, NULL);
     }
 }
+
+
 
 
 /* Thread in charge of sending a clock pulse to the circuit implementing the KARR scan effect.
 At each LH transition, the led will change */
 static void* karrScan(void *arg)
 {
-static int clock_state;    
+static int clock_state=PI_OFF;    
 
-for (;;) {    
-    switch (clock_state) {
-        case PI_ON: gpioSleep(PI_TIME_RELATIVE, 0, 100);  // set high state for clock during 100 us 
-                    gpioWrite(KARR_PIN, PI_OFF); 
-                    clock_state = PI_OFF;
-                    break;
-                 
-        case PI_OFF: gpioSleep(PI_TIME_RELATIVE, 0, karr_delay);
-                     gpioWrite(KARR_PIN, PI_ON);  // LH clock transition changes led
-                     clock_state = PI_ON;
+   for (;;) {    
+      switch (clock_state) {
+         case PI_ON: gpioSleep(PI_TIME_RELATIVE, 0, 100);  // set high state for clock during 100 us 
+                     gpioWrite(KARR_PIN, PI_OFF); 
+                     clock_state = PI_OFF;
                      break;
-    }   
-}   
+                 
+         case PI_OFF: gpioSleep(PI_TIME_RELATIVE, 0, karr_delay);
+                      gpioWrite(KARR_PIN, PI_ON);  // LH clock transition changes led
+                      clock_state = PI_ON;
+                      break;
+      }   
+   }   
 }
 
 
@@ -804,9 +830,11 @@ pthread_t pth;
 /* Para el coche, cierra todo y termina el programa */
 void terminate(int signum)
 {
-   stopMotor(&m_izdo);
-   stopMotor(&m_dcho);
+   fastStopMotor(&m_izdo);
+   fastStopMotor(&m_dcho);
    if (mando.wiimote) cwiid_close(mando.wiimote);
+   closeSonarHCSR04();
+   closeLSM9DS1();
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_OFF);
    gpioSetPullUpDown(VBAT_PIN, PI_PUD_OFF); 
    gpioSetPullUpDown(m_izdo.sensor_pin, PI_PUD_OFF);   
@@ -843,12 +871,17 @@ int setup(void)
    gpioSetMode(bocina.pin, PI_OUTPUT);
    gpioWrite(bocina.pin, PI_OFF);
    
-   if (checkBattery) { 
-    gpioSetMode(VBAT_PIN, PI_INPUT);
-    gpioSetPullUpDown(VBAT_PIN, PI_PUD_DOWN);   // pull-down resistor; avoids floating pin if circuit not connected  
-    gpioSetTimerFunc(1, 15000, getPowerState);  // Comprueba tensión motores cada 15 seg, timer#1
-    getPowerState();    
+   if (checkBattery) {
+      r = setupPCF8591(PCF8591_I2C);
+      if (r==0) gpioSetTimerFunc(1, 500, checkPowerPCF); // Comprueba tensión motores cada 500 mseg, timer#1
+      else { // ADC not available, check battery via VBAT_PIN  
+         gpioSetMode(VBAT_PIN, PI_INPUT);
+         gpioSetPullUpDown(VBAT_PIN, PI_PUD_DOWN);   // pull-down resistor; avoids floating pin if circuit not connected  
+         gpioSetTimerFunc(1, 30000, getPowerState);  // Comprueba tensión motores cada 30 seg, timer#1
+         getPowerState();
+      }
    }
+   
    gpioSetMode(WMSCAN_PIN, PI_INPUT);
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_UP);  // pull-up resistor; button pressed == OFF
    gpioGlitchFilter(WMSCAN_PIN, 100000);      // 0,1 sec filter
@@ -862,13 +895,16 @@ int setup(void)
        terminate(SIGINT);
    }   
 
+   setupLSM9DS1(LSM9DS1_GYR_ACEL_I2C, LSM9DS1_MAG_I2C, calibrateIMU);   // Setup IMU
    setupWiimote(); 
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
    
    activateKarr();  // start KARR scanner effect
    oledSetInversion(false); // clear display
-   r |= setupSonar();
+   
+   r |= setupSonarHCSR04();
+
    return r;
 }
 
@@ -877,9 +913,10 @@ int setup(void)
 void main(int argc, char *argv[])
 {
    int r;
+   double volts;
    
    opterr = 0;  // Prevent getopt from outputting error messages
-   while ((r = getopt(argc, argv, "rbesf:")) != -1)
+   while ((r = getopt(argc, argv, "crbesf:")) != -1)
        switch (r) {
            case 'r':  /* Remote only mode: does not measure distance */
                remoteOnly = true;
@@ -896,6 +933,9 @@ void main(int argc, char *argv[])
            case 'f': /* Set sound file to be played with UP arrow */
                alarmFile = optarg;
                break;
+           case 'c': /* Calibrate IMU sensor */
+               calibrateIMU = true;
+               break;
            default:
                fprintf(stderr, "Uso: %s [-r] [-b] [-e] [-s] [-f <fichero de alarma>]\n", argv[0]);
                exit(1);
@@ -911,6 +951,14 @@ void main(int argc, char *argv[])
    oledBigMessage(0, " Ready  ");
    audioplay("sounds/ready.wav", 1);
    oledBigMessage(0, NULL);
+   
+   // Check if battery low; -1 means that the ADC does not work correctly
+   volts = getMainPowerValue();
+   if (checkBattery && volts>=0 && volts<6.6) {
+      oledBigMessage(0, "Bateria!");
+      audioplay("sounds/batterylow.wav", 1);
+      oledBigMessage(0, NULL);           
+   }
    
    if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autónomo
         oledWriteString(0, 1, "Auto", false);
@@ -934,8 +982,8 @@ void main(int argc, char *argv[])
        // Loop for autonomous mode 
        while (distancia < DISTMIN) {
             //printf("Distancia: %d cm\n", distancia); 
-            stopMotor(&m_izdo);
-            stopMotor(&m_dcho);
+            fastStopMotor(&m_izdo);
+            fastStopMotor(&m_dcho);
             gpioSleep(PI_TIME_RELATIVE, 1, 0);
        
             // No esquiva si ya no pulsamos A
@@ -945,8 +993,8 @@ void main(int argc, char *argv[])
             if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(&m_izdo, &m_dcho, -1);  // con LEFT pulsado, esquiva a la izquierda
             else rota(&m_izdo, &m_dcho, 1);  // en caso contrario a la derecha
             gpioSleep(PI_TIME_RELATIVE, 0, 500000);
-            stopMotor(&m_izdo);
-            stopMotor(&m_dcho);
+            fastStopMotor(&m_izdo);
+            fastStopMotor(&m_dcho);
        }
        
        oledBigMessage(0, NULL);

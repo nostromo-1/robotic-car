@@ -32,7 +32,7 @@ Based on the following original code:
 #include "oled96.h"
 #include "fonts.c"
 
-#define I2C_BUS 1   // Bus 0 for Rev 1 boards, bus 1 for newer boards
+#define I2C_BUS 1   // i2c bus of display: Bus 0 for Rev 1 boards, bus 1 for newer boards
 
 static int iScreenOffset; // current write offset of screen data
 static uint8_t ucScreen[1024]; // local copy of the image buffer
@@ -160,10 +160,11 @@ int rc, rest;
         fprintf(stderr, "oledWriteDataBlock: Invalid buffer\n");
         return;    
     }
-    if (iLen < 1 || iLen > 128) {
+    if (iLen < 0 || iLen > 128) {
         fprintf(stderr, "oledWriteDataBlock: Invalid length for display data\n");
         return;
     }
+    if (iLen == 0) return;
     memcpy(&ucTemp[1], ucBuf, iLen);
     
 	// Keep a copy in local buffer, taking care not to overflow to beginning of row (display in page mode)
@@ -212,10 +213,12 @@ uint8_t uc, ucOld;
 
 // Draw a string of small (8x8) or large (16x24) characters
 // At the given col+row
+// String must have a maximum of 16 characters for small font and 8 for large font
 int oledWriteString(int x, int y, const char *szMsg, bool bLarge)
 {
 int i, j, iLen;
 const uint8_t *s;
+uint8_t buf[16*8];
 
 	if (i2c_handle < 0) return -1; 
    if (y<0 || y>7 || x<0 || x>127) {
@@ -229,23 +232,30 @@ const uint8_t *s;
     
 	iLen = strlen(szMsg);
 	if (bLarge) {  // draw 16x24 font, 8 characters per line
+        if (iLen>8) {
+          fprintf(stderr, "oledWriteString: length of string with large font is over 8 characters\n");
+          return -1;        
+        }  
         for (i=0; i<3; i++) {
             pthread_mutex_lock(&mutex);
             oledSetPosition(x, y+i);
             for (j=0; j<iLen; j++) {
                 s = &ucFont[9728 + (uint8_t)(szMsg[j]&0x7F)*64];  // 0x7F: large font has only 128 characters
-                oledWriteDataBlock(s+16*i, 16);
+                memcpy(buf+j*16, s+16*i, 16);
             }
+            oledWriteDataBlock(buf, iLen*16);
             pthread_mutex_unlock(&mutex); 
         }
 	}
 	else {  // draw 8x8 font, 16 characters per line
+      if (iLen>16) {
+       fprintf(stderr, "oledWriteString: length is over 16 characters\n");
+       return -1;        
+      }
       pthread_mutex_lock(&mutex);
 		oledSetPosition(x, y);
-		for (i=0; i<iLen; i++) {
-			s = &ucFont[(uint8_t)szMsg[i]*8];
-			oledWriteDataBlock(s, 8); // write character pattern
-		}	
+		for (i=0; i<iLen; i++) memcpy(buf+i*8, &ucFont[(uint8_t)szMsg[i]*8], 8);
+      oledWriteDataBlock(buf, iLen*8); // write character pattern
       pthread_mutex_unlock(&mutex);
 	}
 
@@ -255,14 +265,14 @@ const uint8_t *s;
 
 // Write an 8x8 bitmap to display
 // graph is an 8 byte array, glyph must be turned 90 degrees to the right
-int oledSetGraph8(int x, int y, const uint8_t* graph)
+int oledSetBitmap8x8(int x, int y, const uint8_t* graph)
 {
    static const uint8_t empty[] = {0, 0, 0, 0, 0, 0, 0, 0};  // empty space
    const uint8_t *buf;
     
 	if (i2c_handle < 0) return -1; 
    if (y<0 || y>7 || x<0 || x>127) {
-       fprintf(stderr, "oledSetGraph8: Invalid coordinates for display\n");
+       fprintf(stderr, "%s: Invalid coordinates for display\n", __func__);
        return -1;
    }
    if (graph) buf = graph;

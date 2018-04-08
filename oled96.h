@@ -14,6 +14,8 @@ Based on the following original code:
 
 *****************************************************************************/
 
+#include <stdbool.h>
+
 // Initialize the OLED96 library for a specific I2C address
 int oledInit(int iAddress);
 
@@ -41,7 +43,7 @@ int oledSetInversion(bool invert);
 
 // Write an 8x8 bitmap to display
 // graph is an 8 byte array, glyph must be turned 90 degrees to the right
-int oledSetGraph8(int x, int y, const uint8_t *graph);
+int oledSetBitmap8x8(int x, int y, const uint8_t *graph);
 
 
 #endif // OLED96_H
