@@ -873,15 +873,15 @@ int setup(void)
    
    if (checkBattery) {
       r = setupPCF8591(PCF8591_I2C);
-      if (r==0) gpioSetTimerFunc(1, 500, checkPowerPCF); // Comprueba tensión motores cada 500 mseg, timer#1
+      if (r==0) gpioSetTimerFunc(1, 500, checkPowerPCF); // Comprueba tensión baterías cada 500 mseg, timer#1
       else { // ADC not available, check battery via VBAT_PIN  
          gpioSetMode(VBAT_PIN, PI_INPUT);
          gpioSetPullUpDown(VBAT_PIN, PI_PUD_DOWN);   // pull-down resistor; avoids floating pin if circuit not connected  
-         gpioSetTimerFunc(1, 30000, getPowerState);  // Comprueba tensión motores cada 30 seg, timer#1
+         gpioSetTimerFunc(1, 30000, getPowerState);  // Comprueba tensión baterías cada 30 seg, timer#1
          getPowerState();
       }
    }
-   
+
    gpioSetMode(WMSCAN_PIN, PI_INPUT);
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_UP);  // pull-up resistor; button pressed == OFF
    gpioGlitchFilter(WMSCAN_PIN, 100000);      // 0,1 sec filter
@@ -891,7 +891,7 @@ int setup(void)
    r |= sem_init(&semaphore, 0, 0);
    
    if (powerState == PI_OFF) {
-       fprintf(stderr, "La bateria de los motores esta descargada. Coche no arranca!\n");
+       fprintf(stderr, "La bateria esta descargada. Coche no arranca!\n");
        terminate(SIGINT);
    }   
 
@@ -953,7 +953,7 @@ void main(int argc, char *argv[])
    oledBigMessage(0, NULL);
    
    // Check if battery low; -1 means that the ADC does not work correctly
-   volts = getMainPowerValue();
+   volts = getMainPowerValue();  
    if (checkBattery && volts>=0 && volts<6.6) {
       oledBigMessage(0, "Bateria!");
       audioplay("sounds/batterylow.wav", 1);

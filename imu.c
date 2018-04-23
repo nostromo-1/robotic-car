@@ -114,7 +114,7 @@ typedef struct {
   unsigned int last_index;
 } LPFFilter;
 
-LPFFilter filter_x, filter_y, filter_z;
+static LPFFilter filter_x, filter_y, filter_z;
 
 void LPFFilter_init(LPFFilter* f);
 void LPFFilter_put(LPFFilter* f, double input);
@@ -544,7 +544,7 @@ rw_error:
 
    
 /************************************************************
-FUnction called from motor.c when initializing, setup() function
+Function called from motor.c when initializing, setup() function
 
 ************************************************************/
 int setupLSM9DS1(int accel_addr, int mag_addr, bool calibrate)
@@ -554,6 +554,7 @@ int dl, dh;
 int16_t temp;
 uint8_t byte;
 
+   /************************* Open connection and check state ***********************/
    i2c_accel_handle = i2cOpen(I2C_BUS, accel_addr, 0);
    if (i2c_accel_handle < 0) ERR(-1, "Cannot open accelerometer/gyroscope device");
    
@@ -569,16 +570,7 @@ uint8_t byte;
    rc = i2cReadByteData(i2c_mag_handle, 0x0F);  // Read WHO_AM_I register
    if (rc < 0) goto rw_error;
    if (rc != 0x3D) ERR(-1, "Invalid data from magnetometer device");  
-   
-   /************************** Read Termometer ***********************/
-   // Read temperature  
-   dl = rc = i2cReadByteData(i2c_accel_handle, 0x15);  // Read OUT_TEMP_L register   
-   if (rc < 0) goto rw_error;
-   dh = rc = i2cReadByteData(i2c_accel_handle, 0x16);  // Read OUT_TEMP_H register   
-   if (rc < 0) goto rw_error;
-   temp = dh<<8 | dl;  // Raw value read from device, it can be negative
-   printf("Temperatura del LSM9DS1: %.1f grados\n", 25+(double)temp/16.0);
-   
+     
    /************************* Set Magnetometer ***********************/
    
    // Set magnetometer, CTRL_REG1_M
@@ -647,6 +639,15 @@ uint8_t byte;
    rc = i2cWriteByteData(i2c_accel_handle, 0x2E, byte);
    if (rc < 0) goto rw_error; 
 
+   /************************** Read Termometer ***********************/
+   // Read temperature  
+   dl = rc = i2cReadByteData(i2c_accel_handle, 0x15);  // Read OUT_TEMP_L register   
+   if (rc < 0) goto rw_error;
+   dh = rc = i2cReadByteData(i2c_accel_handle, 0x16);  // Read OUT_TEMP_H register   
+   if (rc < 0) goto rw_error;
+   temp = dh<<8 | dl;  // Raw value read from device, it can be negative
+   printf("Temperatura del LSM9DS1: %.1f grados\n", 25+(double)temp/16.0);
+   
    /************************** Handle calibration ********************/
    if (calibrate) {
       calibrate_accel_gyro();
@@ -655,9 +656,10 @@ uint8_t byte;
    }
    else read_calibration_data();
    
-   /************************* Final actions ***********************/    
+   /************************* Final actions ***********************/   
+   // Initialize low pass filter for magnetometer data
    LPFFilter_init(&filter_x); LPFFilter_init(&filter_y); LPFFilter_init(&filter_z);
-   // Start the reading thread
+   // Start the IMU-reading thread
    rc = gpioSetTimerFunc(3, 20, imuRead);  // 20ms clock, timer#3
    if (rc<0) ERR(-1, "Cannot set timer for IMU");
    

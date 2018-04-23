@@ -32,10 +32,12 @@ dtoverlay=i2c-gpio,i2c_gpio_sda=14,i2c_gpio_scl=15,i2c_gpio_delay_us=3
 
 
 static int i2c_handle = -1;
+static double volts;
+
 
 // 3.3 is the voltage reference, 255 are the steps (8 bits ADC resolution)
-// 22000 and 12000 are the resistors in series connected to ADC#1
-static const double factor = 3.3/255*(22000+12000)/12000;  
+// 22000 and 12100 are the precision (1%) resistors in series connected to ADC#1
+static const double factor = 3.3/255*(22000+12100)/12100;  
 
 
 
@@ -70,35 +72,25 @@ rw_error:
 
 
 
-
 double getMainPowerValue(void)
 {
-int rc;
-   
-   if (i2c_handle==-1) return -1;   
-   rc = i2cReadByte(i2c_handle);  
-   if (rc < 0) goto rw_error;
-   return factor*rc;   
-
-   /* error handling if read operation from I2C bus failed */
-rw_error:
-   if (i2c_handle>=0) i2cClose(i2c_handle);
-   i2c_handle = -1;
-   ERR(-1, "Cannot read data from PCF8591");          
+   return volts;
 }
 
 
 
-// This function gets called at fixed intervals
+/* 
+This function gets called at fixed intervals. It reads the ADC#1, connected to the main power supply.
+It displays a symbol in the display according to the battery status.
+*/
 void checkPowerPCF(void)
 {
 uint8_t emptybatt_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};
 int rc, step;
-double volts;
 static int n, old_step = -1;
-    
+
    if (i2c_handle==-1) return;
-   rc = i2cReadByte(i2c_handle);  
+   rc = i2cReadByte(i2c_handle);  // ca. 0.2 ms
    if (rc < 0) goto rw_error;
    volts = factor*rc;
    //printf("volts=%.1f\n", volts);
@@ -115,13 +107,13 @@ static int n, old_step = -1;
       emptybatt_glyph[2] += step;
       emptybatt_glyph[3] += step;
       emptybatt_glyph[4] = emptybatt_glyph[3];
-      emptybatt_glyph[5] = emptybatt_glyph[2];
-      oledSetBitmap8x8(14*8, 0, emptybatt_glyph);
+      emptybatt_glyph[5] = emptybatt_glyph[2];      
+      oledSetBitmap8x8(14*8, 0, emptybatt_glyph);  // ca. 0.8 ms 
       old_step = step;
    }
    
    // Symbol blinks when battery low
-   if (step<=64) {
+   if (step<=64) { 
       if (n++&1) oledSetBitmap8x8(14*8, 0, NULL);
       else oledSetBitmap8x8(14*8, 0, emptybatt_glyph);
    }
