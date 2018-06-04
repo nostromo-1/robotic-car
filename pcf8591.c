@@ -1,7 +1,10 @@
 /*************************************************************************
 
 NXP PCF8591 control code.
-This chip is an A/D converter with 4 channels and D/A converter with 1 channel.
+This chip is an 8 bit A/D converter with 4 channels and D/A converter with 1 channel.
+It is read via I2C bus (max freq is 100 kHz)
+We use it in single-ended mode (4 input channels). Reference and power voltage
+are both the 3.3V output of the Raspberry Pi (it is very stable).
 
 *****************************************************************************/
 
@@ -37,10 +40,14 @@ static double voltage, current;
 
 // 3.3 is the voltage reference, 255 are the steps (8 bits ADC resolution)
 // 22000 and 12100 are the precision (1%) resistors in series connected to ADC#1 for battery voltage
-static const double factor_v = 3.3/255*(22000+12100)/12100;  
+// Precision: about 13 mV (3.3/255) due to ADC times 2.82, which is about 37 mV
+static const double factor_v = 3.3/255*(22000+12100)/12100; 
+ 
 // 1100 and 100 are the precision (1%) resistors in the current sensing circuit connected to ADC#2
 // 0.1 is the sensing resistor (1%)
-static const double factor_i = 3.3/255*(0.1*1100/100);  
+// current = voltage measured / 1.1
+// Precision: 6 mA due to offset voltage in opamp (600 uV in NPN stage) plus 12 mA due to ADC error (13/1.1)
+static const double factor_i = 3.3/255/(0.1*1100/100);  
 
 
 int setupPCF8591(int addr)
@@ -78,7 +85,7 @@ rw_error:
 
 
 
-double getMainPowerValue(void)
+double getMainVoltageValue(void)
 {
    return voltage;
 }
@@ -86,19 +93,22 @@ double getMainPowerValue(void)
 
 
 /* 
-This function gets called at fixed intervals. It reads the ADC#1, connected to the main power supply.
+This function gets called at fixed intervals. 
+Voltage: It reads the ADC#0, connected to the main power supply.
+Current: It reads the ADC#1, connected to a current sensing circuit (max current is 3A). 
+Low currents (in tens of mA) are overestimated.
 It displays a symbol in the display according to the battery status.
 */
 void checkPowerPCF(void)
 {
 uint8_t emptybatt_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};
 int rc, step;
-char adc[4];  // Read all 4 channels of ADC
+char adc[4];  // Store ADC values
 char str[17];
 static int n, old_step = -1;
 static double old_v=-1, old_i=-1;
 
-   rc = i2cReadDevice(i2c_handle, adc, sizeof(adc));
+   rc = i2cReadDevice(i2c_handle, adc, sizeof(adc));  // Read all 4 ADC channels
    if (rc < 0) goto rw_error;
 
    voltage = factor_v*adc[0];
@@ -131,8 +141,8 @@ static double old_v=-1, old_i=-1;
    }
     
    if (voltage!=old_v || current!=old_i) {
-      snprintf(str, sizeof(str), "%.1fV %4.0fmA", voltage, current*1000);
-      oledWriteString(0, 7, str, false);
+      snprintf(str, sizeof(str), "%.1fV %.2fA", voltage, current);
+      oledWriteString(0, 1, str, false);
       old_v = voltage;
       old_i = current;
    }

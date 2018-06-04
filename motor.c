@@ -596,10 +596,10 @@ bool *scanning = (bool*)arg;
     ajustaMotor(&m_izdo, 0, ADELANTE);  // Para el coche mientras escanea wiimotes
     ajustaMotor(&m_dcho, 0, ADELANTE);
     velocidadCoche = INITIAL_SPEED;   // Nueva velocidad inicial, con o sin mando 
-    oledWriteString(0, 1, "    ", false); // Borra mensaje de "Auto", si está           
+    oledWriteString(12*8, 1, "    ", false); // Borra mensaje de "Auto", si está           
     setupWiimote();   
     if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
-        oledWriteString(0, 1, "Auto", false);
+        oledWriteString(12*8, 1, "Auto", false);
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
     } 
@@ -953,7 +953,7 @@ void main(int argc, char *argv[])
    oledBigMessage(0, NULL);
    
    // Check if battery low; -1 means that the ADC does not work correctly
-   volts = getMainPowerValue();  
+   volts = getMainVoltageValue();  
    if (checkBattery && volts>=0 && volts<6.6) {
       oledBigMessage(0, "Bateria!");
       audioplay("sounds/batterylow.wav", 1);
@@ -961,7 +961,7 @@ void main(int argc, char *argv[])
    }
    
    if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autónomo
-        oledWriteString(0, 1, "Auto", false);
+        oledWriteString(12*8, 1, "Auto", false);
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);       
    }
