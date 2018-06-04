@@ -12,12 +12,12 @@ when looking at the car from above and from the back to the front.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <pigpio.h>
 #include <math.h>
 
 #include "imu.h"
+#include "ekf.h"
 #include "oled96.h"
 
 
@@ -188,13 +188,14 @@ double sinpitch, cospitch, sinroll, cosroll, rootayaz, rootaxayaz, alpha=0.05;
    rootayaz = sqrt(ay*ay+az*az);
    rootaxayaz = sqrt(ax*ax+ay*ay+az*az);
    
+   /*********** Calculate roll and pitch *************/
    // Original roll equation: roll = atan2(ay, az).
    // But this is unstable when ay and az tend to zero (pitch=90 degrees).
    // To avoid this, add 5% of ax in denominator
    roll = atan2(ay, az+alpha*ax);  // roll angle able to range between -180 and 180, positive clockwise
    pitch = atan(-ax/rootayaz);     // pitch angle restricted between -90 and 90, positive downwards
    
-   // calculate til-compensated heading (yaw angle)
+   /*********** Calculate tilt-compensated heading (yaw angle) *************/
    // intermediate results
    sinroll = ay/rootayaz;
    cosroll = az/rootayaz;
@@ -203,7 +204,8 @@ double sinpitch, cospitch, sinroll, cosroll, rootayaz, rootaxayaz, alpha=0.05;
    
    // now, calculate yaw
    yaw = atan2(mz*sinroll-my*cosroll, mx*cospitch+my*sinpitch*sinroll+mz*sinpitch*cosroll);
-   // tilt angle from vertical: cos(chi)=cos(roll)*cos(pitch)
+   
+   /*********** Calculate tilt angle from vertical: cos(chi)=cos(roll)*cos(pitch) *************/ 
    chi = 180/M_PI*acos(cosroll*cospitch);
    
    yaw *= 180/M_PI;
@@ -503,7 +505,7 @@ double mxrf, myrf, mzrf; // filtered values
 
          /* Store real values in variables */
          axr = ax*aRes; ayr = ay*aRes; azr = az*aRes;      
-         gxr = gx*aRes; gyr = gy*aRes; gzr = gz*aRes;              
+         gxr = gx*gRes; gyr = gy*gRes; gzr = gz*gRes;              
          
          if (accel_fp) fprintf(accel_fp, "%3.5f;%3.5f;%3.5f\n", axr, ayr, azr);
          
@@ -522,13 +524,17 @@ double mxrf, myrf, mzrf; // filtered values
          if (n==1) oledWriteString(0, 6, str, false);        
          snprintf(str, sizeof(str), "GZ:% 7.1f dps", gzr);  
          if (n==2) oledWriteString(0, 7, str, false);               
-         */ 
+         */
          
+         // 3D compass
          //printOrientation(axr, ayr, azr, mxrf, myrf, mzrf);
          
          // Update sensor fusion filter with the data gathered. Do not filter magnetometer data.
-         MadgwickQuaternionUpdate(axr, ayr, azr, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxr, myr, mzr);
+         //MadgwickQuaternionUpdate(axr, ayr, azr, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxr, myr, mzr);
          //getAttitude(&yaw, &pitch, &roll);
+         
+         // Kalman extended filter
+         //calculateEKFAttitude(gxr, gyr, gzr, axr, ayr, azr, deltat);
       }     
    }
    

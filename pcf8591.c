@@ -32,13 +32,15 @@ dtoverlay=i2c-gpio,i2c_gpio_sda=14,i2c_gpio_scl=15,i2c_gpio_delay_us=3
 
 
 static int i2c_handle = -1;
-static double volts;
+static double voltage, current;
 
 
 // 3.3 is the voltage reference, 255 are the steps (8 bits ADC resolution)
-// 22000 and 12100 are the precision (1%) resistors in series connected to ADC#1
-static const double factor = 3.3/255*(22000+12100)/12100;  
-
+// 22000 and 12100 are the precision (1%) resistors in series connected to ADC#1 for battery voltage
+static const double factor_v = 3.3/255*(22000+12100)/12100;  
+// 1100 and 100 are the precision (1%) resistors in the current sensing circuit connected to ADC#2
+// 0.1 is the sensing resistor (1%)
+static const double factor_i = 3.3/255*(0.1*1100/100);  
 
 
 int setupPCF8591(int addr)
@@ -47,20 +49,24 @@ int rc, byte;
 
    i2c_handle = i2cOpen(I2C_BUS, addr, 0);
    if (i2c_handle < 0) ERR(-1, "Cannot open PCF8591 ADC. No power supply checks.");   
-   
-   byte = 0;
-   rc = i2cWriteByteData(i2c_handle, byte, 0);  // write control byte and a 0 as digital value for DAC
-   if (rc < 0) goto rw_error;   
-   gpioDelay(100000);  // delay of 0.1 sec, so that control byte works and ADC works correctly
-   
-   // Read and discard first byte read: after reset, first byte is always 0x80
-   // Read several bytes, as sometimes the first results are invalid
-   for (byte=0; byte<5; byte++) {
-      rc = i2cReadByte(i2c_handle);  
-      if (rc < 0) goto rw_error;
-      gpioDelay(1000);  // delay of 1 ms
-   }
-   
+  
+   /*  We have to set the chip to reading channel 0 and not increment, so that we have
+   a defined state to begin with */
+   byte = 0; 
+   rc = i2cWriteByte(i2c_handle, byte);  
+   if (rc < 0) goto rw_error; 
+   gpioDelay(100000);  // After writing a control byte, wait for 0.1 sec 
+   rc = i2cReadByte(i2c_handle);  // Read previous conversion and ignore it
+   if (rc < 0) goto rw_error;  
+   gpioDelay(10000);
+
+   /* Now, set increment flag and start reading with channel 1, 
+   as channel 0 was triggered before and will be read by next bus read */
+   byte = 5;
+   rc = i2cWriteByte(i2c_handle, byte);  
+   if (rc < 0) goto rw_error;  
+   gpioDelay(100000);   
+
    return 0;
    
    /* error handling if read operation from I2C bus failed */
@@ -74,7 +80,7 @@ rw_error:
 
 double getMainPowerValue(void)
 {
-   return volts;
+   return voltage;
 }
 
 
@@ -87,19 +93,25 @@ void checkPowerPCF(void)
 {
 uint8_t emptybatt_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};
 int rc, step;
+char adc[4];  // Read all 4 channels of ADC
+char str[17];
 static int n, old_step = -1;
+static double old_v=-1, old_i=-1;
 
-   if (i2c_handle==-1) return;
-   rc = i2cReadByte(i2c_handle);  // ca. 0.2 ms
+   rc = i2cReadDevice(i2c_handle, adc, sizeof(adc));
    if (rc < 0) goto rw_error;
-   volts = factor*rc;
-   //printf("volts=%.1f\n", volts);
 
-   if (volts < 6.2) step = 0;        // Battery at 0%
-   else if (volts < 6.6) step = 64;  // Battery at 20%
-   else if (volts < 7.0) step = 64+32;      // Battery at 40%  
-   else if (volts < 7.4) step = 64+32+16;   // Battery at 60%
-   else if (volts < 7.8) step = 64+32+16+8; // Battery at 80%
+   voltage = factor_v*adc[0];
+   //printf("voltage=%.1f V\n", voltage);
+   
+   current = factor_i*adc[1];  
+   //printf("current=%.0f mA\n", 1000*current); 
+   
+   if (voltage < 6.2) step = 0;        // Battery at 0%
+   else if (voltage < 6.6) step = 64;  // Battery at 20%
+   else if (voltage < 7.0) step = 64+32;      // Battery at 40%  
+   else if (voltage < 7.4) step = 64+32+16;   // Battery at 60%
+   else if (voltage < 7.8) step = 64+32+16+8; // Battery at 80%
    else step = 64+32+16+8+4;  // Battery at 100%
     
    // If battery state changed, update battery symbol on display
@@ -117,7 +129,14 @@ static int n, old_step = -1;
       if (n++&1) oledSetBitmap8x8(14*8, 0, NULL);
       else oledSetBitmap8x8(14*8, 0, emptybatt_glyph);
    }
-     
+    
+   if (voltage!=old_v || current!=old_i) {
+      snprintf(str, sizeof(str), "%.1fV %4.0fmA", voltage, current*1000);
+      oledWriteString(0, 7, str, false);
+      old_v = voltage;
+      old_i = current;
+   }
+               
    return;
    
    /* error handling if read operation from I2C bus failed */
