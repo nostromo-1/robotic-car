@@ -44,9 +44,10 @@ The robot runs on raspbian, I have tested it on the releases from mid 2016. It i
 The program avoids active loops in order to make a light use of CPU. Its CPU usage is about 7% (which is due to pigpio). It makes use of event loops and semaphores in order to avoid active loops.
 The display control code is included in the software for simplicity, it does not need any display driver library.
 
-The following packages need to be installed on plain raspbian (`sudo apt-get install`):
+The following packages need to be installed on plain raspbian lite (`sudo apt-get install`):
+* pigpio
 * libbluetooth-dev
-* libcwiid-dev
+* libcwiid1 libcwiid-dev
 * libasound2-dev
 
 After installing them copy the code files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `sudo ./robot`.
