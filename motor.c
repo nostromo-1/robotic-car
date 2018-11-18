@@ -21,10 +21,12 @@ Realiza el control principal del coche
   
 #include <pigpio.h>
 #include <cwiid.h>
+#include "imu.h"
 #include "oled96.h"
 #include "sound.h"
 #include "pcf8591.h"
-
+#include "bmp085.h"
+#include "robot.h"
 
 extern char *optarg;
 extern int optind, opterr, optopt;
@@ -59,6 +61,7 @@ extern int optind, opterr, optopt;
 #define NUMHOLES 21  /* Número de agujeros en discos de encoder del motor */
 
 #define PCF8591_I2C 0x48           /* Dirección i2c del PCF8591 (AD/DA converter) */
+#define BMP085_I2C 0x77            /* Dirección i2c del BMP085 (sensor temperatura/presión) */
 #define DISPLAY_I2C 0x3C           /* Dirección i2c del display SSD1306 */
 #define LSM9DS1_GYR_ACEL_I2C 0x6B  /* Dirección i2c del módulo acelerómetro/giroscopio del IMU LSM9DS1 */
 #define LSM9DS1_MAG_I2C 0x1E       /* Dirección i2c del módulo magnetómetro del IMU LSM9DS1 */
@@ -239,7 +242,7 @@ int setupMotor(Motor_t *motor)
     r |= gpioSetMode(motor->in1_pin, PI_OUTPUT);
     r |= gpioSetMode(motor->in2_pin, PI_OUTPUT);
     
-    if (gpioSetPWMfrequency(motor->en_pin, 100)<0) r = -1;   /* 100 Hz, low but not audible */
+    if (gpioSetPWMfrequency(motor->en_pin, 500)<0) r = -1;   /* 100 Hz, low but not audible */
     if (gpioSetPWMrange(motor->en_pin, 100)<0) r = -1;       /* Range: 0-100, real range = 2000 */
     
     if (useEncoder) {
@@ -791,7 +794,6 @@ int n = 3;
 
 
 
-
 /* Thread in charge of sending a clock pulse to the circuit implementing the KARR scan effect.
 At each LH transition, the led will change */
 static void* karrScan(void *arg)
@@ -820,10 +822,12 @@ void activateKarr(void)
 {
 pthread_t pth;
     
-    gpioSetMode(KARR_PIN, PI_OUTPUT);
-    gpioWrite(KARR_PIN, PI_OFF);    
-    if (!pthread_create(&pth, NULL, karrScan, NULL)) pthread_detach(pth);   
+   gpioSetMode(KARR_PIN, PI_OUTPUT);
+   gpioWrite(KARR_PIN, PI_OFF); 
+   if (!pthread_create(&pth, NULL, karrScan, NULL)) pthread_detach(pth);   
 }
+
+
 
 
 
@@ -896,6 +900,7 @@ int setup(void)
    }   
 
    setupLSM9DS1(LSM9DS1_GYR_ACEL_I2C, LSM9DS1_MAG_I2C, calibrateIMU);   // Setup IMU
+   setupBMP085(BMP085_I2C);  // Setup temperature/pressure sensor
    setupWiimote(); 
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
