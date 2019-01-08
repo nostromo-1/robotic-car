@@ -46,7 +46,7 @@ The display control code is included in the software for simplicity, it does not
 
 The following packages need to be installed on plain raspbian lite (`sudo apt-get install`):
 * pigpio
-* libbluetooth-dev
+* libbluetooth3 libbluetooth-dev
 * libcwiid1 libcwiid-dev
 * libasound2-dev
 
