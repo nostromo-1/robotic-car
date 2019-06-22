@@ -10,14 +10,14 @@ are both the 3.3V output of the Raspberry Pi (it is very stable).
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
-#include <pthread.h>
 #include <stdbool.h>
 #include <pigpio.h>
 
-
 #include "pcf8591.h"
 #include "oled96.h"
+#include "robot.h"
 
 
 #define ERR(ret, format, arg...)                                       \
@@ -36,30 +36,32 @@ dtoverlay=i2c-gpio,i2c_gpio_sda=14,i2c_gpio_scl=15,i2c_gpio_delay_us=3
 
 static int i2c_handle = -1;
 static double voltage, current;
+static unsigned millis;  // Time between calls to checkPower in miliseconds
 
 
-// 3.3 is the voltage reference, 255 are the steps (8 bits ADC resolution)
+// 3.3 is the voltage reference, 256 are the steps (8 bits ADC resolution)
 // 22000 and 12100 are the precision (1%) resistors in series connected to ADC#1 for battery voltage
-// Precision: about 13 mV (3.3/255) due to ADC times 2.82, which is about 37 mV
-static const double factor_v = 3.3/255*(22000+12100)/12100; 
+// Precision: about 13 mV (3.3/256) due to ADC times 2.82, which is about 37 mV
+static const double factor_v = 3.3/256*(22000+12100)/12100; 
  
 // 1100 and 100 are the precision (1%) resistors in the current sensing circuit connected to ADC#2
 // 0.1 is the sensing resistor (1%)
 // current = voltage measured / 1.1
-// Precision: 6 mA due to offset voltage in opamp (600 uV in NPN stage) plus 12 mA due to ADC error (13/1.1)
-static const double factor_i = 3.3/255/(0.1*1100/100);  
+// Precision: 6 mA due to offset voltage in opamp (600 uV in NPN stage, thus 0.6 mV/0.1) 
+// plus 12 mA due to ADC error (13 mV/1.1)
+static const double factor_i = 3.3/256/(0.1*1100/100);  
 
 
-int setupPCF8591(int addr)
+int setupPCF8591(int addr, unsigned timer, unsigned period)
 {
 int rc, byte;
 
    i2c_handle = i2cOpen(I2C_BUS, addr, 0);
    if (i2c_handle < 0) ERR(-1, "Cannot open PCF8591 ADC. No power supply checks.");   
   
-   /*  We have to set the chip to reading channel 0 and not increment, so that we have
+   /*  We set the chip to reading channel 2 and not increment, so that we have
    a defined state to begin with */
-   byte = 0; 
+   byte = 2; 
    rc = i2cWriteByte(i2c_handle, byte);  
    if (rc < 0) goto rw_error; 
    gpioDelay(100000);  // After writing a control byte, wait for 0.1 sec 
@@ -67,13 +69,18 @@ int rc, byte;
    if (rc < 0) goto rw_error;  
    gpioDelay(10000);
 
-   /* Now, set increment flag and start reading with channel 1, 
-   as channel 0 was triggered before and will be read by next bus read */
-   byte = 5;
-   rc = i2cWriteByte(i2c_handle, byte);  
+   /* Now, set autoincrement flag and start reading with channel 3, 
+   as channel 2 was triggered before and will be read by next bus read */
+   byte = 7;  // 7+64 to activate DAC
+   rc = i2cWriteByte(i2c_handle, byte);  // with DAC: i2cWriteByteData(i2c_handle, byte, 0)
    if (rc < 0) goto rw_error;  
    gpioDelay(100000);   
 
+   /* Call checkPower ciclycally, every millis miliseconds, using the given pigpio timer */
+   millis = period;
+   rc = gpioSetTimerFunc(timer, millis, checkPower); 
+   if (rc < 0) goto rw_error;  
+   
    return 0;
    
    /* error handling if read operation from I2C bus failed */
@@ -87,35 +94,48 @@ rw_error:
 
 double getMainVoltageValue(void)
 {
-   return voltage;
+   if (i2c_handle < 0) return -1;
+   else return voltage;
 }
 
 
 
 /* 
-This function gets called at fixed intervals. 
+This function gets called at fixed intervals, every millis miliseconds
 Voltage: It reads the ADC#0, connected to the main power supply.
 Current: It reads the ADC#1, connected to a current sensing circuit (max current is 3A). 
 Low currents (in tens of mA) are overestimated.
 It displays a symbol in the display according to the battery status.
 */
-void checkPowerPCF(void)
+void checkPower(void)
 {
 uint8_t emptybatt_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};
 int rc, step;
 char adc[4];  // Store ADC values
 char str[17];
+static char str_old[17];
 static int n, old_step = -1;
-static double old_v=-1, old_i=-1;
+static const unsigned maxUndervoltageTime = 3000;  // Miliseconds with undervoltage before shutdown is triggered
+static unsigned underVoltageTime = 0;
 
-   rc = i2cReadDevice(i2c_handle, adc, sizeof(adc));  // Read all 4 ADC channels
+   /* 
+      Read all 4 ADC channels: ch2, ch3, ch0, ch1 into adc array
+      ch2 was triggered in the previous read, so the value we get 
+      is a past value (by the period of the call to this function)
+      Reading in this order is done so that ch0 (V) and ch1 (I) 
+      are triggered and read in this function call, no delay between both
+   */
+   rc = i2cReadDevice(i2c_handle, adc, sizeof(adc));  
    if (rc < 0) goto rw_error;
-
-   voltage = factor_v*adc[0];
-   //printf("voltage=%.1f V\n", voltage);
    
-   current = factor_i*adc[1];  
-   //printf("current=%.0f mA\n", 1000*current); 
+   /* If DAC is activated, we can write value to it like this:
+   static int t;
+   rc = i2cWriteByteData(i2c_handle, 64+7, 100+100*sin(6.28*10*millis*t++));
+   if (rc < 0) goto rw_error;
+   */
+
+   voltage = factor_v*adc[2];
+   current = factor_i*adc[3];  
    
    if (voltage < 6.2) step = 0;        // Battery at 0%
    else if (voltage < 6.6) step = 64;  // Battery at 20%
@@ -123,14 +143,15 @@ static double old_v=-1, old_i=-1;
    else if (voltage < 7.4) step = 64+32+16;   // Battery at 60%
    else if (voltage < 7.8) step = 64+32+16+8; // Battery at 80%
    else step = 64+32+16+8+4;  // Battery at 100%
+   
+   emptybatt_glyph[2] += step;
+   emptybatt_glyph[3] += step;
+   emptybatt_glyph[4] = emptybatt_glyph[3];
+   emptybatt_glyph[5] = emptybatt_glyph[2];     
     
    // If battery state changed, update battery symbol on display
-   if (step!=old_step) {
-      emptybatt_glyph[2] += step;
-      emptybatt_glyph[3] += step;
-      emptybatt_glyph[4] = emptybatt_glyph[3];
-      emptybatt_glyph[5] = emptybatt_glyph[2];      
-      oledSetBitmap8x8(14*8, 0, emptybatt_glyph);  // ca. 0.8 ms 
+   if (step!=old_step) {    
+      oledSetBitmap8x8(14*8, 0, emptybatt_glyph);  
       old_step = step;
    }
    
@@ -140,13 +161,22 @@ static double old_v=-1, old_i=-1;
       else oledSetBitmap8x8(14*8, 0, emptybatt_glyph);
    }
     
-   if (voltage!=old_v || current!=old_i) {
-      snprintf(str, sizeof(str), "%.1fV %.2fA", voltage, current);
+   // Update display only if values changed (it is a slow operation)
+   snprintf(str, sizeof(str), "%.1fV %.2fA", voltage, current);
+   //printf(str); printf("\n");
+   if (strcmp(str, str_old)) {
       oledWriteString(0, 1, str, false);
-      old_v = voltage;
-      old_i = current;
+      strcpy(str_old, str);
    }
-               
+
+   // Shutdown if voltage is too low for a long period
+   if (voltage < 5.8) underVoltageTime += millis;
+   else underVoltageTime = 0;
+   if (underVoltageTime >= maxUndervoltageTime) {   
+      oledBigMessage(1, "SHUTDOWN");
+      execlp("halt", "halt", NULL);   
+   }
+   
    return;
    
    /* error handling if read operation from I2C bus failed */

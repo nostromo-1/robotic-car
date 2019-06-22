@@ -29,7 +29,7 @@ Reproduce un fichero de audio en formato WAV
 
 
 extern volatile bool playing_audio, cancel_audio;
-static int ampliPIN;
+static int ampliPIN;   // GPIO pin for amplifier shutdown
 
 
 struct data {

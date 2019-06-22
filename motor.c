@@ -44,21 +44,20 @@ extern int optind, opterr, optopt;
 #define SONAR_ECHO    24
 
 #define PITO_PIN   26
-#define VBAT_PIN   19
 #define WMSCAN_PIN 12
 #define AUDR_PIN   18
 #define AUDR_ALT PI_ALT5   /* ALT function for audio pin, ALT5 for pin 18 */
 #define AMPLI_PIN  25
-#define LSENSOR_PIN 5
-#define RSENSOR_PIN 6
+#define LSENSOR_PIN 6
+#define RSENSOR_PIN 5
 #define KARR_PIN    4
 
 
 /***************** Define constants and parameters ****************/
 #define DISTMIN 50        /* distancia en cm a la que entendemos que hay un obstáculo */
 #define INITIAL_SPEED 50  /* Entre 0 y 100% */
-#define NUMPOS 3     /* Número de medidas de posición del sonar para promediar */
-#define NUMHOLES 21  /* Número de agujeros en discos de encoder del motor */
+#define NUMPOS 3          /* Número de medidas de posición del sonar para promediar */
+#define NUMPULSES 1920    /* Motor assumed is a DFRobot FIT0450 with encoder. 16 pulses per round, 1:120 gearbox */
 
 #define PCF8591_I2C 0x48           /* Dirección i2c del PCF8591 (AD/DA converter) */
 #define BMP085_I2C 0x77            /* Dirección i2c del BMP085 (sensor temperatura/presión) */
@@ -83,7 +82,7 @@ typedef struct {
     volatile Sentido_t sentido;   /* ADELANTE, ATRAS */
     volatile int velocidad;       /* 0 a 100, velocidad (no real) impuesta al motor */
     volatile int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100 */
-    volatile uint32_t counter, tick, rpm;
+    volatile uint32_t counter, rpm;
     pthread_mutex_t mutex;
 } Motor_t;
 
@@ -111,7 +110,6 @@ typedef struct {
 volatile uint32_t distancia = UINT32_MAX;
 volatile int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 volatile int soundVolume = 96;  // 0 - 100%
-volatile int powerState = PI_ON;
 volatile bool esquivando; // tareas sincronizadas por el semáforo semaphore
 volatile bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
 volatile int karr_delay = 150000;  // Time in us to wait between leds in KARR scan
@@ -195,10 +193,10 @@ void ajustaSentido(Motor_t *motor, Sentido_t dir)
 void fastStopMotor(Motor_t *motor)
 {
     pthread_mutex_lock(&motor->mutex);
-    gpioWrite(motor->in1_pin, PI_OFF);
-    gpioWrite(motor->in2_pin, PI_OFF);
     motor->PWMduty = motor->velocidad = 0;
     gpioPWM(motor->en_pin, motor->PWMduty);
+    gpioWrite(motor->in1_pin, PI_OFF);
+    gpioWrite(motor->in2_pin, PI_OFF);
     pthread_mutex_unlock(&motor->mutex);  
 }
 
@@ -235,6 +233,7 @@ void rota(Motor_t *izdo, Motor_t *dcho, int sentido)
 }
 
 
+
 int setupMotor(Motor_t *motor)
 {
     int r = 0;
@@ -242,14 +241,14 @@ int setupMotor(Motor_t *motor)
     r |= gpioSetMode(motor->in1_pin, PI_OUTPUT);
     r |= gpioSetMode(motor->in2_pin, PI_OUTPUT);
     
-    if (gpioSetPWMfrequency(motor->en_pin, 500)<0) r = -1;   /* 100 Hz, low but not audible */
+    if (gpioSetPWMfrequency(motor->en_pin, 500)<0) r = -1;   /* 500 Hz, low but not audible */
     if (gpioSetPWMrange(motor->en_pin, 100)<0) r = -1;       /* Range: 0-100, real range = 2000 */
     
     if (useEncoder) {
         r |= gpioSetMode(motor->sensor_pin, PI_INPUT);
-        gpioSetPullUpDown(motor->sensor_pin, PI_PUD_DOWN);
+        ///gpioSetPullUpDown(motor->sensor_pin, PI_PUD_DOWN);
         gpioSetAlertFunc(motor->sensor_pin, speedSensor);
-        gpioGlitchFilter(motor->sensor_pin, 1000);      
+        ///gpioGlitchFilter(motor->sensor_pin, 1000);      
     }
     
     if (r) fprintf(stderr, "Cannot initialise motor!\n");
@@ -664,13 +663,9 @@ Motor_t *motor;
 
     switch (level) {
         case PI_ON:
-            motor->counter++;
-            motor->tick = tick;
-            break;
         case PI_OFF:
             motor->counter++;
-            motor->tick = tick;          
-            break;
+            break;           
     }    
 }
 
@@ -679,61 +674,53 @@ Motor_t *motor;
 la diferencia de velocidades entre los motores para igualarlas */
 void speedControl(void)
 {
-static uint32_t past_lcounter, past_ltick;    
-uint32_t current_lcounter =  m_izdo.counter, current_ltick = m_izdo.tick;  
-uint32_t lpulses=0, lperiod, lfreq;
+static uint32_t past_tick; 
+uint32_t current_tick;
+int period;
+   
+static uint32_t past_lcounter;  
+uint32_t current_lcounter =  m_izdo.counter;  
+int lpulses, lfreq;
 
-static uint32_t past_rcounter, past_rtick;    
-uint32_t current_rcounter =  m_dcho.counter, current_rtick = m_dcho.tick;  
-uint32_t rpulses=0, rperiod, rfreq;
+static uint32_t past_rcounter;    
+uint32_t current_rcounter =  m_dcho.counter;  
+int rpulses=0, rfreq;
   
-int pv, kp=15;  // parameters of PID filter: pv is measured error (process value), kp is proportionality constant
+int pv, kp=2;  // parameters of PID filter: pv is measured error (process value), kp is proportionality constant
   
-    // Left motor
-    if (past_ltick == 0) goto l_end;  // Exceptionally, it seems a good use of goto
-    lperiod = current_ltick - past_ltick;
-    if (lperiod) {
-        lpulses = current_lcounter - past_lcounter;
-        lfreq = (1000000*lpulses)/lperiod;
-        m_izdo.rpm = lfreq*60/NUMHOLES/2;
-        //printf("Left motor: pulses=%u, rpm=%u\n", lpulses, m_izdo.rpm);
+    current_tick = gpioTick();
+    if (past_tick == 0) {    // First time speedControl gets called
+       past_tick = current_tick;
+       return;
     }
+    period = current_tick - past_tick;
     
-    l_end:
-    if (past_ltick == 0 || lperiod == 0) {
-        //printf("Left motor stopped\n");
-        m_izdo.rpm = 0;
-    }
+    /***** Left motor *****/
+    lpulses = current_lcounter - past_lcounter;
+    lfreq = (1000000*lpulses)/period;  
+    m_izdo.rpm = lfreq*60/NUMPULSES;
+    //printf("Left motor: pulses=%d, freq=%d, rpm=%d\n", lpulses, lfreq, m_izdo.rpm);
     past_lcounter = current_lcounter;
-    past_ltick = current_ltick;
     
-    // Right motor
-    if (past_rtick == 0) goto r_end;  // Exceptionally, it seems a good use of goto
-    rperiod = current_rtick - past_rtick;
-    if (rperiod) {
-        rpulses = current_rcounter - past_rcounter;
-        rfreq = (1000000*rpulses)/rperiod;
-        m_dcho.rpm = rfreq*60/NUMHOLES/2;
-        //printf("Right motor: pulses=%u, rpm=%u\n", rpulses, m_dcho.rpm);
-    }
-    
-    r_end:
-    if (past_rtick == 0 || rperiod == 0) {
-        //printf("Right motor stopped\n");
-        m_dcho.rpm = 0;    
-    }
+    /***** Right motor *****/
+    rpulses = current_rcounter - past_rcounter;
+    rfreq = (1000000*rpulses)/period;  
+    m_dcho.rpm = rfreq*60/NUMPULSES;
+    //printf("Right motor: pulses=%d, freq=%d, rpm=%d\n", rpulses, rfreq, m_dcho.rpm);
     past_rcounter = current_rcounter;
-    past_rtick = current_rtick;
+        
+    past_tick = current_tick;
+    
     
     /******* P control loop. SP=0, PV=lpulses-rpulses *********/
-    if (m_izdo.velocidad>0 && m_izdo.rpm==0) printf("Left motor stalled\n");
-    if (m_dcho.velocidad>0 && m_dcho.rpm==0) printf("Right motor stalled\n");   
+    //if (m_izdo.velocidad>0 && m_izdo.rpm==0) printf("Left motor stalled\n");
+    //if (m_dcho.velocidad>0 && m_dcho.rpm==0) printf("Right motor stalled\n");   
     if (m_izdo.velocidad != m_dcho.velocidad) return;  // Enter control section if straight line desired: both speeds equal
     if (m_izdo.velocidad == 0) return;  // If speed is 0 (in both), do not enter control section
     pv = lpulses - rpulses;
-    if (pv<=1 && pv >=-1) return;  // Tolerable error, do not enter control section
+    if (pv<=10 && pv >=-10) return;  // Tolerable error, do not enter control section
     
-    /** Control section loop; adjust parameters of filter **/
+    /** Control section loop; adjust parameters **/
     //printf("\tAdjust left: %i, right: %i\n", -(kp*pv)/10, (kp*pv)/10);
     pthread_mutex_lock(&m_izdo.mutex);
     pthread_mutex_lock(&m_dcho.mutex);   
@@ -753,45 +740,6 @@ int pv, kp=15;  // parameters of PID filter: pv is measured error (process value
 
 
 /****************** Funciones auxiliares varias **************************/
-
-
-/* Comprueba si los motores tienen alimentación.
-Devuelve valor de las baterías de alimentación del motor en la variable global powerState: 
-PI_OFF si no hay alimentación o es baja, PI_ON si todo OK
-Toma 3 muestras espaciadas 600 ms, en bucle, hasta que coincidan.
-Esto es necesario porque al arrancar los motores hay un tiempo de oscilación de las baterías, 
-aunque está amortiguado por el condensador del circuito */    
-void getPowerState(void)
-{
-static uint8_t emptybatt_glyph[] = {0, 0, 254, 131, 131, 254, 0, 0};
-int power1, power2, power3;
-int n = 3;
-    
-    do {
-        power1 = gpioRead(VBAT_PIN);
-        if (power1 < 0) return;  // Error al leer, valor inválido
-        gpioSleep(PI_TIME_RELATIVE, 0, 600000);  
-        power2 = gpioRead(VBAT_PIN);
-        if (power2 < 0) return;
-        gpioSleep(PI_TIME_RELATIVE, 0, 600000);  
-        power3 = gpioRead(VBAT_PIN);
-        if (power3 < 0) return;
-    } while (power1!=power2 || power2!=power3);
-    powerState = power1;  // set global variable
-    
-    // señal acústica en caso de batería baja
-    if (powerState == PI_OFF) {
-        oledBigMessage(0, "Bateria!");
-        oledSetBitmap8x8(14*8, 0, emptybatt_glyph);
-        while(n--) {
-            pito(2, 1);  // pita 2 décimas en este hilo (vuelve después de pitar)
-            gpioSleep(PI_TIME_RELATIVE, 0, 200000);  // espera 2 décimas de segundo
-        }
-        gpioSleep(PI_TIME_RELATIVE, 2, 0);
-        oledBigMessage(0, NULL);
-    }
-}
-
 
 
 /* Thread in charge of sending a clock pulse to the circuit implementing the KARR scan effect.
@@ -840,7 +788,6 @@ void terminate(int signum)
    closeSonarHCSR04();
    closeLSM9DS1();
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_OFF);
-   gpioSetPullUpDown(VBAT_PIN, PI_PUD_OFF); 
    gpioSetPullUpDown(m_izdo.sensor_pin, PI_PUD_OFF);   
    gpioSetPullUpDown(m_dcho.sensor_pin, PI_PUD_OFF); 
    gpioWrite(bocina.pin, PI_OFF);
@@ -875,16 +822,7 @@ int setup(void)
    gpioSetMode(bocina.pin, PI_OUTPUT);
    gpioWrite(bocina.pin, PI_OFF);
    
-   if (checkBattery) {
-      r = setupPCF8591(PCF8591_I2C);
-      if (r==0) gpioSetTimerFunc(1, 500, checkPowerPCF); // Comprueba tensión baterías cada 500 mseg, timer#1
-      else { // ADC not available, check battery via VBAT_PIN  
-         gpioSetMode(VBAT_PIN, PI_INPUT);
-         gpioSetPullUpDown(VBAT_PIN, PI_PUD_DOWN);   // pull-down resistor; avoids floating pin if circuit not connected  
-         gpioSetTimerFunc(1, 30000, getPowerState);  // Comprueba tensión baterías cada 30 seg, timer#1
-         getPowerState();
-      }
-   }
+   if (checkBattery) r |= setupPCF8591(PCF8591_I2C, 1, 200);  // Comprueba tensión baterías cada 200 mseg, timer#1
 
    gpioSetMode(WMSCAN_PIN, PI_INPUT);
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_UP);  // pull-up resistor; button pressed == OFF
@@ -894,16 +832,11 @@ int setup(void)
    r |= setupMotor(&m_dcho);
    r |= sem_init(&semaphore, 0, 0);
    
-   if (powerState == PI_OFF) {
-       fprintf(stderr, "La bateria esta descargada. Coche no arranca!\n");
-       terminate(SIGINT);
-   }   
-
    setupLSM9DS1(LSM9DS1_GYR_ACEL_I2C, LSM9DS1_MAG_I2C, calibrateIMU);   // Setup IMU
    setupBMP085(BMP085_I2C);  // Setup temperature/pressure sensor
    setupWiimote(); 
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
-   if (useEncoder) gpioSetTimerFunc(2, 200, speedControl);  // Control velocidad motores, timer#2
+   if (useEncoder) gpioSetTimerFunc(2, 100, speedControl);  // Control velocidad motores, timer#2
    
    activateKarr();  // start KARR scanner effect
    oledSetInversion(false); // clear display
@@ -979,7 +912,7 @@ void main(int argc, char *argv[])
             continue;
        }
              
-       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Enter loop only if A is pressed
+       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Continue loop only if A is pressed
      
        /* Code gets here when obstacle found and robot is not already avoiding it */
        oledBigMessage(0, "OBSTACLE");         
