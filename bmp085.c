@@ -50,16 +50,16 @@ static int temp, press;
 static const double p0 = 1013.25;     // Pressure at sea level (hPa)
 
 
-static uint16_t bmp085ReadInt(int reg);
+static uint16_t bmp085ReadUint(int reg);
 static void readSensor(void);
 
 
 /*
-bmp085ReadInt: it reads 2 bytes from the given register address. MSB is expected first, LSB next.
+bmp085ReadUint: it reads 2 bytes from the given register address. MSB is expected first, LSB next.
 The BMP085 calibration data 0xFFFF and 0x0000 are invalid values, 
 so 0xFFFF is used to signal an error read
 */
-static uint16_t bmp085ReadInt(int reg)
+static uint16_t bmp085ReadUint(int reg)
 {
 int rc, msb, lsb;
    
@@ -73,7 +73,7 @@ int rc, msb, lsb;
 rw_error:
    if (i2c_handle>=0) i2cClose(i2c_handle);
    i2c_handle = -1;
-   ERR(0xFFFF, "Cannot read/write data from BMP085");      
+   ERR(0xFFFF, "Cannot read data from BMP085");      
 }
 
 
@@ -86,28 +86,28 @@ int rc;
    if (i2c_handle < 0) ERR(-1, "Cannot open BMP085 pressure sensor");  
 
    /* Read calibration data from sensor */ 
-   ac1 = bmp085ReadInt(0xAA);
-   if (ac1 == 0xFFFF) goto rw_error;  
-   ac2 = bmp085ReadInt(0xAC);
-   if (ac2 == 0xFFFF) goto rw_error; 
-   ac3 = bmp085ReadInt(0xAE);
-   if (ac3 == 0xFFFF) goto rw_error; 
-   ac4 = bmp085ReadInt(0xB0);
+   ac1 = bmp085ReadUint(0xAA);
+   if (ac1 == -1) goto rw_error;  
+   ac2 = bmp085ReadUint(0xAC);
+   if (ac2 == -1) goto rw_error; 
+   ac3 = bmp085ReadUint(0xAE);
+   if (ac3 == -1) goto rw_error; 
+   ac4 = bmp085ReadUint(0xB0);
    if (ac4 == 0xFFFF) goto rw_error; 
-   ac5 = bmp085ReadInt(0xB2);
+   ac5 = bmp085ReadUint(0xB2);
    if (ac5 == 0xFFFF) goto rw_error; 
-   ac6 = bmp085ReadInt(0xB4);
+   ac6 = bmp085ReadUint(0xB4);
    if (ac6 == 0xFFFF) goto rw_error; 
-   b1 = bmp085ReadInt(0xB6);
-   if (b1 == 0xFFFF) goto rw_error; 
-   b2 = bmp085ReadInt(0xB8);
-   if (b2 == 0xFFFF) goto rw_error; 
-   mb = bmp085ReadInt(0xBA);
-   if (mb == 0xFFFF) goto rw_error; 
-   mc = bmp085ReadInt(0xBC);
-   if (mc == 0xFFFF) goto rw_error; 
-   md = bmp085ReadInt(0xBE);
-   if (md == 0xFFFF) goto rw_error;  
+   b1 = bmp085ReadUint(0xB6);
+   if (b1 == -1) goto rw_error; 
+   b2 = bmp085ReadUint(0xB8);
+   if (b2 == -1) goto rw_error; 
+   mb = bmp085ReadUint(0xBA);
+   if (mb == -1) goto rw_error; 
+   mc = bmp085ReadUint(0xBC);
+   if (mc == -1) goto rw_error; 
+   md = bmp085ReadUint(0xBE);
+   if (md == -1) goto rw_error;  
    
    rc = gpioSetTimerFunc(4, 500, readSensor);  // read data every 500ms, timer#4
    if (rc<0) ERR(-1, "Cannot set timer for BMP085");
@@ -118,7 +118,7 @@ int rc;
 rw_error:
    if (i2c_handle>=0) i2cClose(i2c_handle);
    i2c_handle = -1;
-   ERR(-1, "Cannot read/write data from BMP085");   
+   return -1;
 }
 
 
@@ -134,11 +134,13 @@ void closeBMP085(void)
 // Value returned will be in units of 0.1 deg C
 static int16_t bmp085GetTemperature(uint16_t ut)
 {
-int32_t x1, x2;
+int32_t x1, x2, xx;
 int16_t tmp;
   
    x1 = ((uint32_t)(ut-ac6)*(uint32_t)ac5) >> 15;
-   x2 = ((int32_t)mc << 11)/(x1 + (int32_t)md);
+   xx = x1 + (int32_t)md;
+   if (xx == 0) return -100;
+   x2 = ((int32_t)mc << 11) / xx;
    b5 = x1 + x2;
    tmp = (b5 + 8)>>4;
    
@@ -166,6 +168,7 @@ uint32_t b4, b7;
    x2 = ((int32_t)b1 * ((b6 * b6)>>12))>>16;
    x3 = ((x1 + x2) + 2)>>2;
    b4 = (ac4 * (uint32_t)(x3 + 32768))>>15;
+   if (b4 == 0) return -1;
   
    b7 = (up - b3) * (50000>>oss);
    if (b7 < 0x80000000) p = (b7<<1)/b4;
@@ -204,12 +207,12 @@ uint32_t up;
   
    rc = i2cWriteByteData(i2c_handle, 0xF4, 0x2E);  // Tell sensor to read temperature
    if (rc < 0) goto rw_error; 
-   gpioDelay(4500);  // Wait for 4.5 ms for the process to complete
-   ut = bmp085ReadInt(0xF6);
+   gpioDelay(4500);  // Wait 4.5 ms for the process to complete
+   ut = bmp085ReadUint(0xF6);
    
    rc = i2cWriteByteData(i2c_handle, 0xF4, 0x34 + (oss<<6));  // Tell sensor to read pressure
    if (rc < 0) goto rw_error; 
-   
+
    // Wait for the process to complete
    switch(oss) {
       case 0: gpioDelay(4500);
@@ -224,7 +227,7 @@ uint32_t up;
    }
    
    // Read raw result
-   up = bmp085ReadInt(0xF6); 
+   up = bmp085ReadUint(0xF6); 
    if (oss > 0) {
       rc = i2cReadByteData(i2c_handle, 0xF8);
       if (rc < 0) goto rw_error; 
@@ -232,10 +235,10 @@ uint32_t up;
       up = ((up<<8) + xlsb) >> (8-oss);
    }
 
-   temp = bmp085GetTemperature(ut); 
+   temp = bmp085GetTemperature(ut);      
    press = bmp085GetPressure(up);   
-   
-   return ;
+
+   return;
    
 rw_error:
    if (i2c_handle>=0) i2cClose(i2c_handle);
