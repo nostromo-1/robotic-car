@@ -86,7 +86,7 @@ void setVolume(int volume)
         snd_mixer_selem_register(handle, NULL, NULL);
         rc = snd_mixer_load(handle);
         if (rc < 0) {
-            fprintf(stderr, "Error al abrir mixer de audio: %s\n", snd_strerror(rc));    
+            fprintf(stderr, "Error al cargar mixer de audio: %s\n", snd_strerror(rc));    
             return;
         }
         snd_mixer_selem_id_alloca(&sid);
@@ -115,6 +115,12 @@ void setupSound(int gpio)
     gpioWrite(ampliPIN, PI_OFF);     // shutdown amplifier
 }
 
+
+void closeSound(void)
+{
+   cancel_audio = true;
+   gpioWrite(ampliPIN, PI_OFF);     // shutdown amplifier
+}
 
 
 void* play_wav(void *filename)

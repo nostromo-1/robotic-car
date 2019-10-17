@@ -37,7 +37,7 @@ dtoverlay=i2c-gpio,i2c_gpio_sda=14,i2c_gpio_scl=15,i2c_gpio_delay_us=3
 static int i2c_handle = -1;
 static double voltage, current;
 static unsigned millis;  // Time between calls to checkPower in miliseconds
-
+static unsigned timerNumber; // The timer used to perodically read the ADC
 
 // 3.3 is the voltage reference, 256 are the steps (8 bits ADC resolution)
 // 22000 and 12100 are the precision (1%) resistors in series connected to ADC#1 for battery voltage
@@ -78,7 +78,8 @@ int rc, byte;
 
    /* Call checkPower ciclycally, every millis miliseconds, using the given pigpio timer */
    millis = period;
-   rc = gpioSetTimerFunc(timer, millis, checkPower); 
+   timerNumber = timer;
+   rc = gpioSetTimerFunc(timerNumber, millis, checkPower); 
    if (rc < 0) goto rw_error;  
    
    return 0;
@@ -90,6 +91,13 @@ rw_error:
    ERR(-1, "Cannot read/write data from PCF8591");   
 }
 
+
+void closePCF8591(void)
+{
+   gpioSetTimerFunc(timerNumber, millis, NULL);
+   i2cClose(i2c_handle);
+   i2c_handle = -1;
+}
 
 
 double getMainVoltageValue(void)
@@ -113,9 +121,10 @@ uint8_t emptybatt_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};
 int rc, step;
 char adc[4];  // Store ADC values
 char str[17];
+
 static char str_old[17];
 static int n, old_step = -1;
-static const unsigned maxUndervoltageTime = 3000;  // Miliseconds with undervoltage before shutdown is triggered
+static const unsigned maxUndervoltageTime = 3000;  // Milliseconds with undervoltage before shutdown is triggered
 static unsigned underVoltageTime = 0;
 
    /* 
@@ -172,8 +181,10 @@ static unsigned underVoltageTime = 0;
    // Shutdown if voltage is too low for a long period
    if (voltage < 5.8) underVoltageTime += millis;
    else underVoltageTime = 0;
-   if (underVoltageTime >= maxUndervoltageTime) {   
+   if (underVoltageTime >= maxUndervoltageTime) {  
+      oledBigMessage(0, "Bateria!");   
       oledBigMessage(1, "SHUTDOWN");
+      closedown();
       execlp("halt", "halt", NULL);   
    }
    
@@ -181,8 +192,6 @@ static unsigned underVoltageTime = 0;
    
    /* error handling if read operation from I2C bus failed */
 rw_error:
-   if (i2c_handle>=0) i2cClose(i2c_handle);
-   i2c_handle = -1;
    ERR(, "Cannot read data from PCF8591");       
 }
 

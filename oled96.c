@@ -306,6 +306,25 @@ uint8_t temp[128];
 	return 0;
 } /* oledFill() */
 
+
+// Write a message in big font on display
+// line: 0 or 1 (writes message in lines 2,3,4 or 5,6,7 respectively)
+void oledBigMessage(int line, const char *msg)
+{
+    static const char *empty = "        ";
+    char *buf;
+    
+    if (line<0 || line>1) {
+        fprintf(stderr, "oledBigMessage: line must be 0 or 1\n");
+        return;
+    }
+    if (msg) buf = (char *)msg; 
+    else buf = (char *)empty;
+    
+    oledWriteString(0, 2+3*line, buf, true); 
+}
+
+
 // Fix the orientation of the font image data, defined in fonts.c
 static void RotateFont90(void)
 {

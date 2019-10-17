@@ -45,5 +45,7 @@ int oledSetInversion(bool invert);
 // graph is an 8 byte array, glyph must be turned 90 degrees to the right
 int oledSetBitmap8x8(int x, int y, const uint8_t *graph);
 
+// Write a message in big font on display
+void oledBigMessage(int line, const char *msg);
 
 #endif // OLED96_H

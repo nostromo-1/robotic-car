@@ -8,6 +8,7 @@ Control of the audio amplifier
 
 // Inicializa el interfaz de audio. Parámetro: el pin por el que se activa el amplificador
 void setupSound(int gpio);
+void closeSound(void);
 
 // Ajusta el volumen de audio; rango: 0-100
 void setVolume(int volume);

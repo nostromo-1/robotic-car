@@ -4,6 +4,7 @@
 
 // Inicializa el chip
 int setupPCF8591(int addr, unsigned timer, unsigned millis);
+void closePCF8591(void);
 void checkPower(void);
 double getMainVoltageValue(void);
 

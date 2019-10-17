@@ -40,8 +40,8 @@ extern int optind, opterr, optopt;
 #define MD_IN1 20
 #define MD_IN2 21
 
-#define SONAR_TRIGGER 23
-#define SONAR_ECHO    24
+#define SONAR_TRIGGER_PIN 23
+#define SONAR_ECHO_PIN    24
 
 #define PITO_PIN   26
 #define WMSCAN_PIN 12
@@ -53,11 +53,15 @@ extern int optind, opterr, optopt;
 #define KARR_PIN    4
 
 
+
 /***************** Define constants and parameters ****************/
-#define DISTMIN 50        /* distancia en cm a la que entendemos que hay un obstáculo */
+#define DISTMIN 40        /* distancia en cm a la que entendemos que hay un obstáculo */
 #define INITIAL_SPEED 50  /* Entre 0 y 100% */
 #define NUMPOS 3          /* Número de medidas de posición del sonar para promediar */
 #define NUMPULSES 1920    /* Motor assumed is a DFRobot FIT0450 with encoder. 16 pulses per round, 1:120 gearbox */
+#define WHEELD 68         /* Wheel diameter in mm */
+#define KARRDELAY 150     /* Time in ms to wait between leds in KARR scan */
+#define SONARDELAY 50     /* Time in ms between sonar triggers */
 
 #define PCF8591_I2C 0x48           /* Dirección i2c del PCF8591 (AD/DA converter) */
 #define BMP085_I2C 0x77            /* Dirección i2c del BMP085 (sensor temperatura/presión) */
@@ -67,10 +71,14 @@ extern int optind, opterr, optopt;
 
 
 
+void speedControl(void);  /* Callback called periodically to make motors rotate equally */
 
 /* Callbacks called when some GPIO pin changes */
 void speedSensor(int gpio, int level, uint32_t tick);
 void wmScan(int gpio, int level, uint32_t tick);
+
+void ajustaCocheConMando(void); /* Read wiimote buttons and adjust speed accordingly */
+void rota(int sentido);  /* Rotate car on the spot */
 
  
 /****************** Variables y tipos globales **************************/
@@ -83,6 +91,7 @@ typedef struct {
     volatile int velocidad;       /* 0 a 100, velocidad (no real) impuesta al motor */
     volatile int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100 */
     volatile uint32_t counter, rpm;
+    volatile uint32_t speedsetTick;  // system tick value when velocidad is set
     pthread_mutex_t mutex;
 } Motor_t;
 
@@ -103,17 +112,16 @@ typedef struct {
 typedef struct {
     const unsigned int trigger_pin, echo_pin;
     volatile bool triggered;
-    volatile uint32_t distancia;
+    volatile uint32_t distance;
 } SonarHCSR04_t;
 
 
-volatile uint32_t distancia = UINT32_MAX;
+volatile uint32_t distance = UINT32_MAX;
 volatile int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
-volatile int soundVolume = 96;  // 0 - 100%
 volatile bool esquivando; // tareas sincronizadas por el semáforo semaphore
 volatile bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
-volatile int karr_delay = 150000;  // Time in us to wait between leds in KARR scan
 
+int soundVolume = 96;  // 0 - 100%
 sem_t semaphore;
 bool remoteOnly, useEncoder, checkBattery, softTurn, calibrateIMU; // program line options
 char *alarmFile = "sounds/police.wav";
@@ -127,9 +135,9 @@ Bocina_t bocina = {
 };
 
 SonarHCSR04_t sonarHCSR04 = {
-    .trigger_pin = SONAR_TRIGGER,
-    .echo_pin = SONAR_ECHO,
-    .distancia = UINT32_MAX,
+    .trigger_pin = SONAR_TRIGGER_PIN,
+    .echo_pin = SONAR_ECHO_PIN,
+    .distance = UINT32_MAX,
     .triggered = false
 };
 
@@ -149,26 +157,6 @@ Motor_t m_dcho = {
     .sensor_pin = RSENSOR_PIN,
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
-
-
-
-
-/****************** Funciones del display **************************/
-
-void oledBigMessage(int line, const char *msg)
-{
-    static const char *empty = "        ";
-    char *buf;
-    
-    if (line<0 || line>1) {
-        fprintf(stderr, "oledBigMessage: line must be 0 or 1\n");
-        return;
-    }
-    if (msg) buf = (char *)msg; 
-    else buf = (char *)empty;
-    
-    oledWriteString(0, 2+3*line, buf, true); 
-}
 
 
 
@@ -193,10 +181,11 @@ void ajustaSentido(Motor_t *motor, Sentido_t dir)
 void fastStopMotor(Motor_t *motor)
 {
     pthread_mutex_lock(&motor->mutex);
-    motor->PWMduty = motor->velocidad = 0;
-    gpioPWM(motor->en_pin, motor->PWMduty);
     gpioWrite(motor->in1_pin, PI_OFF);
     gpioWrite(motor->in2_pin, PI_OFF);
+    motor->PWMduty = motor->velocidad = 0;
+    gpioPWM(motor->en_pin, motor->PWMduty);
+    motor->speedsetTick = gpioTick();
     pthread_mutex_unlock(&motor->mutex);  
 }
 
@@ -215,20 +204,21 @@ void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
     ajustaSentido(motor, sentido);
     motor->PWMduty = motor->velocidad = v;
     gpioPWM(motor->en_pin, motor->PWMduty);
+    motor->speedsetTick = gpioTick();
     pthread_mutex_unlock(&motor->mutex);   
 }
 
 
 
-/* Rota el coche a la derecha (dextrógiro, sentido>0) o a la izquierda (levógiro, sentido<0)*/
-void rota(Motor_t *izdo, Motor_t *dcho, int sentido)  
+/* Rota el coche a la derecha (dextrógiro, sentido>0) o a la izquierda (levógiro, sentido<0) */
+void rota(int sentido)  
 {
     if (sentido>0) {  // sentido horario
-       ajustaMotor(izdo, softTurn?50:100, ADELANTE);
-       ajustaMotor(dcho, softTurn?0:100, ATRAS);
+       ajustaMotor(&m_dcho, softTurn?0:velocidadCoche, ATRAS);
+       ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
     } else{
-       ajustaMotor(dcho, softTurn?50:100, ADELANTE);
-       ajustaMotor(izdo, softTurn?0:100, ATRAS);
+       ajustaMotor(&m_izdo, softTurn?0:velocidadCoche, ATRAS);
+       ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);
     }    
 }
 
@@ -246,13 +236,22 @@ int setupMotor(Motor_t *motor)
     
     if (useEncoder) {
         r |= gpioSetMode(motor->sensor_pin, PI_INPUT);
-        ///gpioSetPullUpDown(motor->sensor_pin, PI_PUD_DOWN);
-        gpioSetAlertFunc(motor->sensor_pin, speedSensor);
-        ///gpioGlitchFilter(motor->sensor_pin, 1000);      
+        gpioSetAlertFunc(motor->sensor_pin, speedSensor); 
+        gpioSetTimerFunc(2, 100, speedControl);  // Control velocidad motores cada 100 ms, timer#2         
     }
     
     if (r) fprintf(stderr, "Cannot initialise motor!\n");
     return r;
+}
+
+
+void closeMotor(Motor_t *motor)
+{
+   if (useEncoder) {
+      gpioSetAlertFunc(motor->sensor_pin, NULL); 
+      gpioSetTimerFunc(2, 100, NULL);
+   }
+   fastStopMotor(motor);
 }
 
 
@@ -273,12 +272,12 @@ void sonarTrigger(void)
 void sonarEcho(int gpio, int level, uint32_t tick)
 {
    static uint32_t startTick, distance_array[NUMPOS], pos_array=0;
-   static uint32_t distancia_previa = UINT32_MAX;
+   static uint32_t old_distance = UINT32_MAX;
    static int firstTime=0;
    static bool false_echo;
-   uint32_t suma, diffTick, d;
+   uint32_t suma, d;
    char str[17];
-   int i;
+   int i, diffTick;
   
    switch (level) {
    case PI_ON: 
@@ -299,7 +298,6 @@ void sonarEcho(int gpio, int level, uint32_t tick)
  
            if (firstTime>=0) {
               if (firstTime < NUMPOS) { /* The first NUMPOS times until array is filled */
-                  //distancia = d;
                   firstTime++;
                   break;
               } else firstTime = -1;  /* Initialisation is over */
@@ -307,17 +305,17 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            
            /* Calculate moving average */
            for (i=0, suma=0; i<NUMPOS; i++) suma += distance_array[i]; 
-           sonarHCSR04.distancia = suma/NUMPOS;   
+           sonarHCSR04.distance = suma/NUMPOS;   
            
-           /* Set global variable "distancia" and activate main loop if below threshold */
-           distancia = sonarHCSR04.distancia;  
-           if (distancia != distancia_previa) {
-               snprintf(str, sizeof(str), "Dist (cm): %-3u", distancia);
+           /* Set global variable "distance" and activate main loop if below threshold */
+           distance = sonarHCSR04.distance;  
+           if (distance != old_distance) {
+               snprintf(str, sizeof(str), "Dist (cm): %-3u", distance);
                oledWriteString(0, 0, str, false);
-               distancia_previa = distancia;
+               old_distance = distance;
            }
            
-           if (!remoteOnly && distancia < DISTMIN && !esquivando) {
+           if (!remoteOnly && distance < DISTMIN && !esquivando) {
                esquivando = true;
                i = sem_post(&semaphore);  // indica al loop de main que hay un obstáculo delante
                if (i) perror("Error al activar semáforo");
@@ -336,7 +334,7 @@ int setupSonarHCSR04(void)
    gpioSetMode(sonarHCSR04.echo_pin, PI_INPUT);
 
    /* update sonar several times a second */
-   if (gpioSetTimerFunc(0, 60, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
+   if (gpioSetTimerFunc(0, SONARDELAY, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
         gpioSetAlertFunc(sonarHCSR04.echo_pin, sonarEcho)) {  /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
         return -1;
@@ -347,7 +345,7 @@ int setupSonarHCSR04(void)
 
 void closeSonarHCSR04(void)
 {
-   gpioSetTimerFunc(0, 60, NULL);
+   gpioSetTimerFunc(0, SONARDELAY, NULL);
    gpioSetAlertFunc(sonarHCSR04.echo_pin, NULL);
    gpioSetMode(sonarHCSR04.trigger_pin, PI_INPUT);
 }
@@ -417,7 +415,7 @@ void pito(uint32_t decimas, int modo)
 /* Reproduce "file" en otro hilo.
 file debe ser un string invariable, en memoria 
 modo=0; vuelve inmediatamente, sin esperar el final
-modo=1; vuelve después de haber tocado */
+modo=1; vuelve después de haber reproducido el fichero de audio */
 void audioplay(char *file, int modo)
 {
     pthread_t pth;
@@ -448,8 +446,7 @@ void wiiErr(cwiid_wiimote_t *wiimote, const char *s, va_list ap)
 /*** wiimote event loop ***/
 static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_mesg mesg[], struct timespec *t)
 {
-    int i, v_izdo, v_dcho;
-    Sentido_t s_izdo, s_dcho;
+    int i;
     static uint16_t previous_buttons;
     unsigned int bateria;
     static int LEDs[4] = { CWIID_LED1_ON,  CWIID_LED1_ON | CWIID_LED2_ON,
@@ -490,37 +487,8 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                 }
             }
             
-            /*** Botones A, B y RIGHT, LEFT; si estamos esquivando, sale: el loop de main tiene el control ***/
-            if (!esquivando) {
-                /*** Botones A y B, leen la variable global "velocidadCoche" ***/
-                if (mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
-                    v_izdo = v_dcho = velocidadCoche;
-                    if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
-                    else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrás (botón B), invierte sentido
-    
-                    /*** Botones LEFT y RIGHT, giran el coche ***/
-                    if (mando.buttons&CWIID_BTN_RIGHT) {
-                        s_dcho = 1 - s_dcho;
-                        if (softTurn) v_dcho = 0;
-                        else v_dcho = 50;
-                        v_izdo += 20; 
-                    } 
-            
-                    if (mando.buttons&CWIID_BTN_LEFT) {
-                        s_izdo = 1 - s_izdo;
-                        if (softTurn) v_izdo = 0; 
-                        else v_izdo = 50;
-                        v_dcho += 20;                
-                    }
-                } else {  // Ni A ni B pulsados
-                    v_izdo = v_dcho = 0;
-                    s_izdo = s_dcho = ADELANTE;
-                }
-                        
-                /*** Ahora activa la velocidadCoche calculada en cada motor ***/
-                ajustaMotor(&m_izdo, v_izdo, s_izdo);
-                ajustaMotor(&m_dcho, v_dcho, s_dcho);
-            }
+            /*** Botones A, B y RIGHT, LEFT; si estamos esquivando, no: el loop de main tiene el control ***/
+            if (!esquivando) ajustaCocheConMando();
     
             /*** pito ***/
             if (~previous_buttons&CWIID_BTN_DOWN && mando.buttons&CWIID_BTN_DOWN) activaPito();    
@@ -644,6 +612,42 @@ pthread_t pth;
 }
 
 
+/* Read wiimote buttons and adjust speed accordingly */
+void ajustaCocheConMando(void)
+{
+int v_izdo, v_dcho;
+Sentido_t s_izdo, s_dcho;
+
+   v_izdo = v_dcho = 0;
+   s_izdo = s_dcho = ADELANTE;
+   
+   /*** Botones A y B, leen la variable global "velocidadCoche" ***/
+   if (mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
+      v_izdo = v_dcho = velocidadCoche;
+      if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
+      else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrás (botón B), invierte sentido
+    
+      /*** Botones LEFT y RIGHT, giran el coche ***/
+      if (mando.buttons&CWIID_BTN_RIGHT) {
+         s_dcho = 1 - s_dcho;
+         if (softTurn) v_dcho = 0;
+         else v_dcho = 50;
+         v_izdo += 10; 
+       } 
+            
+       if (mando.buttons&CWIID_BTN_LEFT) {
+         s_izdo = 1 - s_izdo;
+         if (softTurn) v_izdo = 0; 
+         else v_izdo = 50;
+         v_dcho += 10;                
+       }
+   }
+   
+   /*** Ahora activa la velocidadCoche calculada en cada motor ***/
+   ajustaMotor(&m_izdo, v_izdo, s_izdo);
+   ajustaMotor(&m_dcho, v_dcho, s_dcho);           
+}
+               
 
 /***************Funciones de control de la velocidad ********************/
 /* callback llamado cuando el pin LSENSOR_PIN o RSENSOR_PIN cambia de estado
@@ -680,17 +684,23 @@ int period;
    
 static uint32_t past_lcounter;  
 uint32_t current_lcounter =  m_izdo.counter;  
-int lpulses, lfreq;
+int lpulses, lfreq, lpwm;
 
 static uint32_t past_rcounter;    
 uint32_t current_rcounter =  m_dcho.counter;  
-int rpulses=0, rfreq;
+int rpulses, rfreq, rpwm;
   
-int pv, kp=2;  // parameters of PID filter: pv is measured error (process value), kp is proportionality constant
+int pv, kp=1;  // parameters of PID filter: pv is measured error (process value), kp is proportionality constant
+static const int MINSETUP = 1E6;  // Allow for 1 second (1E6 microseconds) for motors to stabilise before PID control loop works
+  
+static FILE *fp;  
   
     current_tick = gpioTick();
     if (past_tick == 0) {    // First time speedControl gets called
        past_tick = current_tick;
+       //fp = fopen("motors.txt", "w");
+       if (fp) setlinebuf(fp);
+       if (fp) fprintf(fp, "ticks,m_izdo.rpm,m_dcho.rpm,m_izdo.PWMduty,m_dcho.PWMduty,m_izdo.velocidad,m_dcho.velocidad\r\n");
        return;
     }
     period = current_tick - past_tick;
@@ -699,39 +709,42 @@ int pv, kp=2;  // parameters of PID filter: pv is measured error (process value)
     lpulses = current_lcounter - past_lcounter;
     lfreq = (1000000*lpulses)/period;  
     m_izdo.rpm = lfreq*60/NUMPULSES;
-    //printf("Left motor: pulses=%d, freq=%d, rpm=%d\n", lpulses, lfreq, m_izdo.rpm);
     past_lcounter = current_lcounter;
+    //printf("Left motor: pulses=%d, freq=%d, rpm=%d\n", lpulses, lfreq, m_izdo.rpm);
     
     /***** Right motor *****/
     rpulses = current_rcounter - past_rcounter;
     rfreq = (1000000*rpulses)/period;  
     m_dcho.rpm = rfreq*60/NUMPULSES;
-    //printf("Right motor: pulses=%d, freq=%d, rpm=%d\n", rpulses, rfreq, m_dcho.rpm);
     past_rcounter = current_rcounter;
+    //printf("Right motor: pulses=%d, freq=%d, rpm=%d\n", rpulses, rfreq, m_dcho.rpm);
         
     past_tick = current_tick;
     
+    if (fp) fprintf(fp, "%u,%d,%d,%d,%d,%d,%d\r\n", current_tick, m_izdo.rpm, m_dcho.rpm, m_izdo.PWMduty, m_dcho.PWMduty, m_izdo.velocidad, m_dcho.velocidad);
     
     /******* P control loop. SP=0, PV=lpulses-rpulses *********/
-    //if (m_izdo.velocidad>0 && m_izdo.rpm==0) printf("Left motor stalled\n");
-    //if (m_dcho.velocidad>0 && m_dcho.rpm==0) printf("Right motor stalled\n");   
-    if (m_izdo.velocidad != m_dcho.velocidad) return;  // Enter control section if straight line desired: both speeds equal
+    if (m_izdo.velocidad != m_dcho.velocidad) return;  // Enter control section only if straight line desired: both speeds equal
     if (m_izdo.velocidad == 0) return;  // If speed is 0 (in both), do not enter control section
+    /*** If time elapsed since speed was set in motor is below a threshold, 
+         so that it had no time to stabilise, do not enter ***/ 
+    if (current_tick - m_izdo.speedsetTick < MINSETUP) return;
+    if (current_tick - m_dcho.speedsetTick < MINSETUP) return;
+    
     pv = lpulses - rpulses;
-    if (pv<=10 && pv >=-10) return;  // Tolerable error, do not enter control section
+    if (pv<=8 && pv >=-8) return;  // Tolerable error, do not enter control section
     
     /** Control section loop; adjust parameters **/
     //printf("\tAdjust left: %i, right: %i\n", -(kp*pv)/10, (kp*pv)/10);
     pthread_mutex_lock(&m_izdo.mutex);
     pthread_mutex_lock(&m_dcho.mutex);   
-    m_izdo.PWMduty -= (kp*pv)/10;
+    m_izdo.PWMduty -= (kp*pv)/10;  // PWMduty can go outside the interval [0,100], let it go
     m_dcho.PWMduty += (kp*pv)/10;
-    if (m_izdo.PWMduty>100) m_izdo.PWMduty = 100;
-    if (m_izdo.PWMduty<0) m_izdo.PWMduty = 0;
-    if (m_dcho.PWMduty>100) m_dcho.PWMduty = 100;
-    if (m_dcho.PWMduty<0) m_dcho.PWMduty = 0;
-    gpioPWM(m_izdo.en_pin, m_izdo.PWMduty);
-    gpioPWM(m_dcho.en_pin, m_dcho.PWMduty);   
+    lpwm = m_izdo.PWMduty; rpwm = m_dcho.PWMduty;  // But lpwm and rpwm cannot go out of [0,100]
+    if (lpwm>100) lpwm = 100; if (lpwm<0) lpwm = 0;
+    if (rpwm>100) rpwm = 100; if (rpwm<0) rpwm = 0;
+    gpioPWM(m_izdo.en_pin, lpwm);
+    gpioPWM(m_dcho.en_pin, rpwm);   
     pthread_mutex_unlock(&m_izdo.mutex); 
     pthread_mutex_unlock(&m_dcho.mutex);
 }
@@ -744,57 +757,54 @@ int pv, kp=2;  // parameters of PID filter: pv is measured error (process value)
 
 /* Thread in charge of sending a clock pulse to the circuit implementing the KARR scan effect.
 At each LH transition, the led will change */
-static void* karrScan(void *arg)
-{
-static int clock_state=PI_OFF;    
-
-   for (;;) {    
-      switch (clock_state) {
-         case PI_ON: gpioSleep(PI_TIME_RELATIVE, 0, 100);  // set high state for clock during 100 us 
-                     gpioWrite(KARR_PIN, PI_OFF); 
-                     clock_state = PI_OFF;
-                     break;
-                 
-         case PI_OFF: gpioSleep(PI_TIME_RELATIVE, 0, karr_delay);
-                      gpioWrite(KARR_PIN, PI_ON);  // LH clock transition changes led
-                      clock_state = PI_ON;
-                      break;
-      }   
-   }   
+void karrScan(void)
+{  
+   gpioWrite(KARR_PIN, PI_ON); 
+   gpioSleep(PI_TIME_RELATIVE, 0, 100);  // set high state for clock during 100 us 
+   gpioWrite(KARR_PIN, PI_OFF);
 }
 
 
 
 /* Activa el efecto scanner de los leds delanteros, como KARR */
-void activateKarr(void)
-{
-pthread_t pth;
-    
+void setupKarr(void)
+{    
    gpioSetMode(KARR_PIN, PI_OUTPUT);
    gpioWrite(KARR_PIN, PI_OFF); 
-   if (!pthread_create(&pth, NULL, karrScan, NULL)) pthread_detach(pth);   
+   gpioSetTimerFunc(5, KARRDELAY, karrScan);    
 }
 
 
+void closeKarr(void)
+{
+   gpioSetTimerFunc(5, KARRDELAY, NULL); 
+}
+
+
+/* Terminate program, clean up, restore settings so that car stops */
+void closedown(void)
+{
+   closeSonarHCSR04();
+   if (mando.wiimote) cwiid_close(mando.wiimote);
+   closeMotor(&m_izdo);
+   closeMotor(&m_dcho);
+   closeSound();
+   closeLSM9DS1();
+   closeBMP085();
+   closeKarr();
+   gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_OFF);
+   gpioWrite(bocina.pin, PI_OFF);
+   gpioSetMode(bocina.pin, PI_INPUT);
+   gpioSetMode(KARR_PIN, PI_INPUT);   
+}
 
 
 
 /* Para el coche, cierra todo y termina el programa */
 void terminate(int signum)
 {
-   fastStopMotor(&m_izdo);
-   fastStopMotor(&m_dcho);
-   if (mando.wiimote) cwiid_close(mando.wiimote);
-   closeSonarHCSR04();
-   closeLSM9DS1();
-   gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_OFF);
-   gpioSetPullUpDown(m_izdo.sensor_pin, PI_PUD_OFF);   
-   gpioSetPullUpDown(m_dcho.sensor_pin, PI_PUD_OFF); 
-   gpioWrite(bocina.pin, PI_OFF);
-   gpioSetMode(AUDR_PIN, PI_INPUT);
-   gpioSetMode(AMPLI_PIN, PI_INPUT);
-   gpioSetMode(KARR_PIN, PI_INPUT);
-    
+   closedown();
+   if (checkBattery) closePCF8591();  // Do not call this in closedown()
    oledShutdown();
    gpioTerminate();
    exit(1);
@@ -836,12 +846,11 @@ int setup(void)
    setupBMP085(BMP085_I2C);  // Setup temperature/pressure sensor
    setupWiimote(); 
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
-   if (useEncoder) gpioSetTimerFunc(2, 100, speedControl);  // Control velocidad motores, timer#2
    
-   activateKarr();  // start KARR scanner effect
+   setupKarr();  // start KARR scanner effect
    oledSetInversion(false); // clear display
    
-   r |= setupSonarHCSR04();
+   r |= setupSonarHCSR04();  // last, as it starts measuring distance and triggering semaphore
 
    return r;
 }
@@ -897,7 +906,7 @@ void main(int argc, char *argv[])
       audioplay("sounds/batterylow.wav", 1);
       oledBigMessage(0, NULL);           
    }
-   
+
    if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autónomo
         oledWriteString(12*8, 1, "Auto", false);
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
@@ -912,34 +921,31 @@ void main(int argc, char *argv[])
             continue;
        }
              
-       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Continue loop only if A is pressed
+       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Go to obstacle avoidance only if A is pressed
      
        /* Code gets here when obstacle found and robot is not already avoiding it */
-       oledBigMessage(0, "OBSTACLE");         
-       
-       // Loop for autonomous mode 
-       while (distancia < DISTMIN) {
-            //printf("Distancia: %d cm\n", distancia); 
-            fastStopMotor(&m_izdo);
-            fastStopMotor(&m_dcho);
-            gpioSleep(PI_TIME_RELATIVE, 1, 0);
-       
-            // No esquiva si ya no pulsamos A
-            if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) break;
+       oledBigMessage(0, "OBSTACLE");               
+
+       // Loop for obstacle avoidance
+       while (distance < DISTMIN) {
+            //printf("Distancia: %d cm\n", distance);   
+            if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) {   // No esquiva si ya no pulsamos A
+               fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
+               break;
+            }
 
             // Gira un poco el coche para esquivar el obstáculo
-            if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(&m_izdo, &m_dcho, -1);  // con LEFT pulsado, esquiva a la izquierda
-            else rota(&m_izdo, &m_dcho, 1);  // en caso contrario a la derecha
-            gpioSleep(PI_TIME_RELATIVE, 0, 500000);
-            fastStopMotor(&m_izdo);
-            fastStopMotor(&m_dcho);
+            if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(-1);  // con LEFT pulsado, esquiva a la izquierda
+            else rota(1);  // en caso contrario a la derecha
+            gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Sleep for the time to get a new distance measure
        }
        
        oledBigMessage(0, NULL);
-       // Hemos esquivado el obstáculo, ahora velocidad normal si A está pulsada o coche es autonomo
-       if (!mando.wiimote || mando.buttons&CWIID_BTN_A) {
-            ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
-            ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);
+       // Hemos esquivado el obstáculo, ahora velocidad normal
+       if (mando.wiimote) ajustaCocheConMando();
+       else {
+         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
+         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);             
        }
    }
    
