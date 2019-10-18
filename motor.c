@@ -213,10 +213,10 @@ void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
 /* Rota el coche a la derecha (dextrógiro, sentido>0) o a la izquierda (levógiro, sentido<0) */
 void rota(int sentido)  
 {
-    if (sentido>0) {  // sentido horario
+    if (sentido>0) {  // sentido horario, clockwise
        ajustaMotor(&m_dcho, softTurn?0:velocidadCoche, ATRAS);
        ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
-    } else{
+    } else {
        ajustaMotor(&m_izdo, softTurn?0:velocidadCoche, ATRAS);
        ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);
     }    
@@ -562,9 +562,8 @@ static void* scanWiimotes(void *arg)
 {
 bool *scanning = (bool*)arg;
 
-    *scanning = true;  // signal to wmScan that scanning is already in place    
-    ajustaMotor(&m_izdo, 0, ADELANTE);  // Para el coche mientras escanea wiimotes
-    ajustaMotor(&m_dcho, 0, ADELANTE);
+    *scanning = true;  // signal to wmScan that scanning is already in place   
+    fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);   // Para el coche mientras escanea wiimotes 
     velocidadCoche = INITIAL_SPEED;   // Nueva velocidad inicial, con o sin mando 
     oledWriteString(12*8, 1, "    ", false); // Borra mensaje de "Auto", si está           
     setupWiimote();   
@@ -585,7 +584,7 @@ void wmScan(int gpio, int level, uint32_t tick)
 static uint32_t time;
 static bool pressed;
 static bool scanning;
-pthread_t pth;
+static pthread_t pth;
     
     switch (level) {
         case PI_ON:   // Sync button released
@@ -594,8 +593,10 @@ pthread_t pth;
             
             /* Long press (>2 sec): shutdown */
             if (tick-time > 2*1000000) {
+                oledBigMessage(0, "MANUAL");
                 oledBigMessage(1, "SHUTDOWN");
                 pito(10, 1);
+                closedown();
                 execlp("halt", "halt", NULL);
                 return; // should never return
             }
@@ -908,17 +909,23 @@ void main(int argc, char *argv[])
    }
 
    if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autónomo
-        oledWriteString(12*8, 1, "Auto", false);
-        ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
-        ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);       
+        oledWriteString(12*8, 1, "Auto", false);    
    }
    
    for (;;) { 
        esquivando = false;  // señala a sonarEcho que ya se puede volver a enviar la señal de obstáculo encontrado
+       
+       /* Adjust car to move */
+       if (mando.wiimote || remoteOnly) ajustaCocheConMando();  // wiimote controlled car
+       else {  // autonomous car
+         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
+         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);             
+       }
+         
        r = sem_wait(&semaphore);   // bloquea hasta que encontremos un obstáculo o haya que escanear wiimotes
        if (r) {
-            perror("Error al esperar al semaforo");
-            continue;
+         perror("Error al esperar al semaforo");
+         continue;
        }
              
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Go to obstacle avoidance only if A is pressed
@@ -928,28 +935,21 @@ void main(int argc, char *argv[])
 
        // Loop for obstacle avoidance
        while (distance < DISTMIN) {
-            //printf("Distancia: %d cm\n", distance);   
-            if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) {   // No esquiva si ya no pulsamos A
-               fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
-               break;
-            }
+         //printf("Distancia: %d cm\n", distance);   
+          if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) {   // No esquiva si ya no pulsamos A
+            fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
+            break;
+          }
 
-            // Gira un poco el coche para esquivar el obstáculo
-            if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(-1);  // con LEFT pulsado, esquiva a la izquierda
-            else rota(1);  // en caso contrario a la derecha
-            gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Sleep for the time to get a new distance measure
+          // Gira un poco el coche para esquivar el obstáculo
+          if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(-1);  // con LEFT pulsado, esquiva a la izquierda
+          else rota(1);  // en caso contrario a la derecha
+          gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Sleep for the time to get a new distance measure
        }
        
+       // Hemos esquivado el obstáculo, o hemos dejado de pulsar A     
        oledBigMessage(0, NULL);
-       // Hemos esquivado el obstáculo, ahora velocidad normal
-       if (mando.wiimote) ajustaCocheConMando();
-       else {
-         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
-         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);             
-       }
    }
-   
-   
 }
 
 
