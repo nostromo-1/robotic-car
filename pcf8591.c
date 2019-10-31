@@ -179,7 +179,7 @@ static unsigned underVoltageTime = 0;
    }
 
    // Shutdown if voltage is too low for a long period
-   if (voltage < 5.8) underVoltageTime += millis;
+   if (voltage < 5.6) underVoltageTime += millis;
    else underVoltageTime = 0;
    if (underVoltageTime >= maxUndervoltageTime) {  
       oledBigMessage(0, "Bateria!");   

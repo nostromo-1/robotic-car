@@ -57,11 +57,12 @@ extern int optind, opterr, optopt;
 /***************** Define constants and parameters ****************/
 #define DISTMIN 40        /* distancia en cm a la que entendemos que hay un obstáculo */
 #define INITIAL_SPEED 50  /* Entre 0 y 100% */
+#define SONARDELAY 50     /* Time in ms between sonar triggers */
 #define NUMPOS 3          /* Número de medidas de posición del sonar para promediar */
 #define NUMPULSES 1920    /* Motor assumed is a DFRobot FIT0450 with encoder. 16 pulses per round, 1:120 gearbox */
 #define WHEELD 68         /* Wheel diameter in mm */
 #define KARRDELAY 150     /* Time in ms to wait between leds in KARR scan */
-#define SONARDELAY 50     /* Time in ms between sonar triggers */
+
 
 #define PCF8591_I2C 0x48           /* Dirección i2c del PCF8591 (AD/DA converter) */
 #define BMP085_I2C 0x77            /* Dirección i2c del BMP085 (sensor temperatura/presión) */
@@ -71,19 +72,10 @@ extern int optind, opterr, optopt;
 
 
 
-void speedControl(void);  /* Callback called periodically to make motors rotate equally */
-
-/* Callbacks called when some GPIO pin changes */
-void speedSensor(int gpio, int level, uint32_t tick);
-void wmScan(int gpio, int level, uint32_t tick);
-
-void ajustaCocheConMando(void); /* Read wiimote buttons and adjust speed accordingly */
-void rota(int sentido);  /* Rotate car on the spot */
-
- 
 /****************** Variables y tipos globales **************************/
 
 typedef enum {ADELANTE, ATRAS} Sentido_t;
+typedef enum {CW, ACW} Rotation_t;
 
 typedef struct {
     const unsigned int en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
@@ -116,17 +108,35 @@ typedef struct {
 } SonarHCSR04_t;
 
 
+/*
+struct Car_t {
+    Motor_t m_izdo, m_dcho;
+    SonarHCSR04_t sonarHCSR04;
+    Bocina_t bocina;
+    MandoWii_t mando;
+    
+    volatile uint32_t distance;
+    volatile int velocidadCoche;
+    volatile bool esquivando;
+
+    
+    
+} car;
+*/
+
+
 volatile uint32_t distance = UINT32_MAX;
 volatile int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
-volatile bool esquivando; // tareas sincronizadas por el semáforo semaphore
+volatile bool esquivando; // Car is avoiding obstacle
+volatile bool stalled;    // Car is stalled while avoiding obstacle
 volatile bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
 
 int soundVolume = 96;  // 0 - 100%
-sem_t semaphore;
+sem_t semaphore;  // Used to synchronize the main loop with the sonar measurement task
 bool remoteOnly, useEncoder, checkBattery, softTurn, calibrateIMU; // program line options
 char *alarmFile = "sounds/police.wav";
-MandoWii_t mando;
 
+MandoWii_t mando;
 
 Bocina_t bocina = {
     .pitando = false,
@@ -158,6 +168,17 @@ Motor_t m_dcho = {
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
+
+
+/* Forward declarations of internal functions */
+void speedControl(void);  /* Callback called periodically to make motors rotate equally */
+void ajustaCocheConMando(void); /* Read wiimote buttons and adjust speed accordingly */
+void rota(Rotation_t rotation, Sentido_t marcha);  /* Rotate car on the spot */
+
+
+/* Callbacks called when some GPIO pin changes */
+void speedSensor(int gpio, int level, uint32_t tick);
+void wmScan(int gpio, int level, uint32_t tick);
 
 
 
@@ -210,16 +231,36 @@ void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
 
 
 
-/* Rota el coche a la derecha (dextrógiro, sentido>0) o a la izquierda (levógiro, sentido<0) */
-void rota(int sentido)  
+/* Rota el coche a la derecha (dextrógiro, sentido==CW) o a la izquierda (levógiro, sentido==ACW) */
+void rota(Rotation_t rotation, Sentido_t marcha)  
 {
-    if (sentido>0) {  // sentido horario, clockwise
-       ajustaMotor(&m_dcho, softTurn?0:velocidadCoche, ATRAS);
-       ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
-    } else {
-       ajustaMotor(&m_izdo, softTurn?0:velocidadCoche, ATRAS);
-       ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);
-    }    
+Motor_t *pivot, *non_pivot;
+
+   switch (marcha) {
+      case ADELANTE: if (rotation==CW) {
+                        pivot = &m_dcho;
+                        non_pivot = &m_izdo;
+                     }
+                     else {
+                        pivot = &m_izdo;
+                        non_pivot = &m_dcho;
+                     }
+                     break;
+      case ATRAS: if (rotation==CW) {
+                        pivot = &m_izdo;
+                        non_pivot = &m_dcho;
+                  }
+                  else {
+                     pivot = &m_dcho;
+                     non_pivot = &m_izdo;
+                  }
+                  break;
+      default: fprintf(stderr, "%s: Bad Sentido_t parameter: %d\n", __func__, marcha);
+               return;
+   }
+
+   ajustaMotor(pivot, softTurn?0:velocidadCoche, 1-marcha);
+   ajustaMotor(non_pivot, velocidadCoche, marcha);
 }
 
 
@@ -622,8 +663,8 @@ Sentido_t s_izdo, s_dcho;
    v_izdo = v_dcho = 0;
    s_izdo = s_dcho = ADELANTE;
    
-   /*** Botones A y B, leen la variable global "velocidadCoche" ***/
-   if (mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
+      /*** Botones A y B, leen la variable global "velocidadCoche" ***/
+   if (mando.wiimote && mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
       v_izdo = v_dcho = velocidadCoche;
       if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
       else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrás (botón B), invierte sentido
@@ -634,14 +675,14 @@ Sentido_t s_izdo, s_dcho;
          if (softTurn) v_dcho = 0;
          else v_dcho = 50;
          v_izdo += 10; 
-       } 
+      } 
             
-       if (mando.buttons&CWIID_BTN_LEFT) {
+      if (mando.buttons&CWIID_BTN_LEFT) {
          s_izdo = 1 - s_izdo;
          if (softTurn) v_izdo = 0; 
          else v_izdo = 50;
          v_dcho += 10;                
-       }
+      }
    }
    
    /*** Ahora activa la velocidadCoche calculada en cada motor ***/
@@ -756,6 +797,59 @@ static FILE *fp;
 /****************** Funciones auxiliares varias **************************/
 
 
+/**
+Loop called when an obstable was detected by the sonar. It tries to avoid it,
+and only returns if it was avoided or the user stopped pressing A.
+**/
+void avoidObstacle(void)
+{
+int stallCount=0, maxStallCount;
+uint32_t old_distance;
+
+   maxStallCount = 1000/SONARDELAY;  // How many times we have to wait for a SONARDELAY time in 1 second
+   old_distance = distance;
+   
+   /** Loop for obstacle avoidance **/
+   while (distance < DISTMIN) {
+      /** Check that the user keeps pressing A **/
+      if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) {  
+         fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
+         break;
+      }
+
+      /**  Rotate the car to avoid obstacle **/
+      if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(ACW, ADELANTE);  // con LEFT pulsado, esquiva a la izquierda
+      else rota(CW, ADELANTE);  // en caso contrario a la derecha
+      gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Sleep for the time to get a new distance measure
+
+      if (abs(old_distance - distance)<=2) {  // distance should slowly change while rotating
+         stallCount++;
+         if (stallCount%maxStallCount==0) {  // ca. 1 second without distance change, so we are stalled
+            stalled = true;  
+            /** Stalled, move a bit backwards **/
+            fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
+            gpioSleep(PI_TIME_RELATIVE, 0, 200000);
+            ajustaMotor(&m_izdo, 50, ATRAS);
+            ajustaMotor(&m_dcho, 50, ATRAS);  
+            gpioSleep(PI_TIME_RELATIVE, 0, 400000); // Move a little backwards first
+            /** Now rotate backwards **/
+            rota(CW, ATRAS);  
+            gpioSleep(PI_TIME_RELATIVE, 0, velocidadCoche>70?300000:600000);
+         }
+      }
+      else {  // Distance changed while rotating, so the car is not stalled
+         stallCount = 0;
+         stalled = false;
+      }
+
+      
+   }
+   stalled = false;
+}
+
+
+
+
 /* Thread in charge of sending a clock pulse to the circuit implementing the KARR scan effect.
 At each LH transition, the led will change */
 void karrScan(void)
@@ -772,7 +866,7 @@ void setupKarr(void)
 {    
    gpioSetMode(KARR_PIN, PI_OUTPUT);
    gpioWrite(KARR_PIN, PI_OFF); 
-   gpioSetTimerFunc(5, KARRDELAY, karrScan);    
+   gpioSetTimerFunc(5, KARRDELAY, karrScan);    // Cool KARR LED effect, timer#5
 }
 
 
@@ -912,6 +1006,8 @@ void main(int argc, char *argv[])
         oledWriteString(12*8, 1, "Auto", false);    
    }
    
+   
+   /*** Main control loop ***/
    for (;;) { 
        esquivando = false;  // señala a sonarEcho que ya se puede volver a enviar la señal de obstáculo encontrado
        
@@ -930,25 +1026,15 @@ void main(int argc, char *argv[])
              
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Go to obstacle avoidance only if A is pressed
      
-       /* Code gets here when obstacle found and robot is not already avoiding it */
+       /* Code gets here when an obstacle is found and robot is not already avoiding it */
+       printf("Entra a esquivar\n");
        oledBigMessage(0, "OBSTACLE");               
 
-       // Loop for obstacle avoidance
-       while (distance < DISTMIN) {
-         //printf("Distancia: %d cm\n", distance);   
-          if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) {   // No esquiva si ya no pulsamos A
-            fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
-            break;
-          }
-
-          // Gira un poco el coche para esquivar el obstáculo
-          if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(-1);  // con LEFT pulsado, esquiva a la izquierda
-          else rota(1);  // en caso contrario a la derecha
-          gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Sleep for the time to get a new distance measure
-       }
+       avoidObstacle();
        
-       // Hemos esquivado el obstáculo, o hemos dejado de pulsar A     
+       // Hemos esquivado el obstáculo  
        oledBigMessage(0, NULL);
+       printf("Sale de esquivar\n");
    }
 }
 
