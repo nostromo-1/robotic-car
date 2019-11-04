@@ -36,8 +36,8 @@ dtoverlay=i2c-gpio,i2c_gpio_sda=14,i2c_gpio_scl=15,i2c_gpio_delay_us=3
 
 static int i2c_handle = -1;
 static double voltage, current;
-static unsigned millis;  // Time between calls to checkPower in miliseconds
-static unsigned timerNumber; // The timer used to perodically read the ADC
+static const unsigned millis = 200;  // Time between calls to checkPower in milliseconds
+static unsigned timerNumber;         // The timer used to periodically read the ADC
 
 // 3.3 is the voltage reference, 256 are the steps (8 bits ADC resolution)
 // 22000 and 12100 are the precision (1%) resistors in series connected to ADC#1 for battery voltage
@@ -52,32 +52,21 @@ static const double factor_v = 3.3/256*(22000+12100)/12100;
 static const double factor_i = 3.3/256/(0.1*1100/100);  
 
 
-int setupPCF8591(int addr, unsigned timer, unsigned period)
+int setupPCF8591(int addr, unsigned timer)
 {
 int rc, byte;
 
    i2c_handle = i2cOpen(I2C_BUS, addr, 0);
    if (i2c_handle < 0) ERR(-1, "Cannot open PCF8591 ADC. No power supply checks.");   
-  
-   /*  We set the chip to reading channel 2 and not increment, so that we have
-   a defined state to begin with */
-   byte = 2; 
-   rc = i2cWriteByte(i2c_handle, byte);  
-   if (rc < 0) goto rw_error; 
-   gpioDelay(100000);  // After writing a control byte, wait for 0.1 sec 
+
+   byte = 6+64;  // Set autoincrement flag, start reading channel 2, single ended inputs, enable DAC 
+   rc = i2cWriteByteData(i2c_handle, byte, 0);  // Write control byte, set DAC output to zero
+   if (rc < 0) goto rw_error;  
+   gpioSleep(PI_TIME_RELATIVE, 0, 5000);  // Does not read correctly without delay
    rc = i2cReadByte(i2c_handle);  // Read previous conversion and ignore it
-   if (rc < 0) goto rw_error;  
-   gpioDelay(10000);
-
-   /* Now, set autoincrement flag and start reading with channel 3, 
-   as channel 2 was triggered before and will be read by next bus read */
-   byte = 7;  // 7+64 to activate DAC
-   rc = i2cWriteByte(i2c_handle, byte);  // with DAC: i2cWriteByteData(i2c_handle, byte, 0)
-   if (rc < 0) goto rw_error;  
-   gpioDelay(100000);   
-
-   /* Call checkPower ciclycally, every millis miliseconds, using the given pigpio timer */
-   millis = period;
+   if (rc < 0) goto rw_error;   
+   
+   /* Call checkPower ciclycally, every millis miliseconds, using the given pigpio timer, timer#1 */
    timerNumber = timer;
    rc = gpioSetTimerFunc(timerNumber, millis, checkPower); 
    if (rc < 0) goto rw_error;  
@@ -109,8 +98,8 @@ double getMainVoltageValue(void)
 
 
 /* 
-This function gets called at fixed intervals, every millis miliseconds
-Voltage: It reads the ADC#0, connected to the main power supply.
+This function gets called at fixed intervals, every millis milliseconds
+Voltage: It reads the ADC#0, connected to the main power supply (max voltage is 9.3V).
 Current: It reads the ADC#1, connected to a current sensing circuit (max current is 3A). 
 Low currents (in tens of mA) are overestimated.
 It displays a symbol in the display according to the battery status.
@@ -172,7 +161,6 @@ static unsigned underVoltageTime = 0;
     
    // Update display only if values changed (it is a slow operation)
    snprintf(str, sizeof(str), "%.1fV %.2fA", voltage, current);
-   //printf(str); printf("\n");
    if (strcmp(str, str_old)) {
       oledWriteString(0, 1, str, false);
       strcpy(str_old, str);
@@ -182,10 +170,10 @@ static unsigned underVoltageTime = 0;
    if (voltage < 5.6) underVoltageTime += millis;
    else underVoltageTime = 0;
    if (underVoltageTime >= maxUndervoltageTime) {  
-      oledBigMessage(0, "Bateria!");   
+      oledBigMessage(0, "Battery!");   
       oledBigMessage(1, "SHUTDOWN");
       closedown();
-      execlp("halt", "halt", NULL);   
+      execlp("poweroff", "poweroff", NULL);   
    }
    
    return;

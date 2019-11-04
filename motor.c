@@ -124,11 +124,13 @@ struct Car_t {
 } car;
 */
 
+enum timers {TIMER0, TIMER1, TIMER2, TIMER3, TIMER4, TIMER5, TIMER6, TIMER7, TIMER8, TIMER9};
 
 volatile uint32_t distance = UINT32_MAX;
 volatile int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 volatile bool esquivando; // Car is avoiding obstacle
 volatile bool stalled;    // Car is stalled while avoiding obstacle
+volatile bool scanningWiimote;  // User pressed button and car is scanning for wiimotes
 volatile bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
 
 int soundVolume = 96;  // 0 - 100%
@@ -278,7 +280,7 @@ int setupMotor(Motor_t *motor)
     if (useEncoder) {
         r |= gpioSetMode(motor->sensor_pin, PI_INPUT);
         gpioSetAlertFunc(motor->sensor_pin, speedSensor); 
-        gpioSetTimerFunc(2, 100, speedControl);  // Control velocidad motores cada 100 ms, timer#2         
+        gpioSetTimerFunc(TIMER2, 100, speedControl);  // Control velocidad motores cada 100 ms, timer#2         
     }
     
     if (r) fprintf(stderr, "Cannot initialise motor!\n");
@@ -290,7 +292,7 @@ void closeMotor(Motor_t *motor)
 {
    if (useEncoder) {
       gpioSetAlertFunc(motor->sensor_pin, NULL); 
-      gpioSetTimerFunc(2, 100, NULL);
+      gpioSetTimerFunc(TIMER2, 100, NULL);
    }
    fastStopMotor(motor);
 }
@@ -356,7 +358,7 @@ void sonarEcho(int gpio, int level, uint32_t tick)
                old_distance = distance;
            }
            
-           if (!remoteOnly && distance < DISTMIN && !esquivando) {
+           if (!remoteOnly && distance < DISTMIN && !esquivando && !scanningWiimote) {
                esquivando = true;
                i = sem_post(&semaphore);  // indica al loop de main que hay un obstáculo delante
                if (i) perror("Error al activar semáforo");
@@ -375,8 +377,8 @@ int setupSonarHCSR04(void)
    gpioSetMode(sonarHCSR04.echo_pin, PI_INPUT);
 
    /* update sonar several times a second */
-   if (gpioSetTimerFunc(0, SONARDELAY, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
-        gpioSetAlertFunc(sonarHCSR04.echo_pin, sonarEcho)) {  /* monitor sonar echos */
+   if (gpioSetTimerFunc(TIMER0, SONARDELAY, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
+        gpioSetAlertFunc(sonarHCSR04.echo_pin, sonarEcho)) {     /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
         return -1;
        }
@@ -386,7 +388,7 @@ int setupSonarHCSR04(void)
 
 void closeSonarHCSR04(void)
 {
-   gpioSetTimerFunc(0, SONARDELAY, NULL);
+   gpioSetTimerFunc(TIMER0, SONARDELAY, NULL);
    gpioSetAlertFunc(sonarHCSR04.echo_pin, NULL);
    gpioSetMode(sonarHCSR04.trigger_pin, PI_INPUT);
 }
@@ -601,19 +603,18 @@ void setupWiimote(void)
 
 static void* scanWiimotes(void *arg)
 {
-bool *scanning = (bool*)arg;
-
-    *scanning = true;  // signal to wmScan that scanning is already in place   
+    scanningWiimote = true;  // signal that scanning is in place   
     fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);   // Para el coche mientras escanea wiimotes 
-    velocidadCoche = INITIAL_SPEED;   // Nueva velocidad inicial, con o sin mando 
+    velocidadCoche = 0;
     oledWriteString(12*8, 1, "    ", false); // Borra mensaje de "Auto", si está           
-    setupWiimote();   
+    setupWiimote(); 
+    velocidadCoche = INITIAL_SPEED;   // Nueva velocidad inicial, con o sin mando     
     if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
         oledWriteString(12*8, 1, "Auto", false);
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
     } 
-    *scanning = false;  // signal to wmScan that scanning is over
+    scanningWiimote = false;  // signal that scanning is over
     return NULL;
 }
 
@@ -622,9 +623,8 @@ bool *scanning = (bool*)arg;
 /* callback llamado cuando el pin WMSCAN_PIN cambia de estado. Tiene un pull-up a VCC, OFF==pulsado */
 void wmScan(int gpio, int level, uint32_t tick)
 {
-static uint32_t time;
+static uint32_t pressTime;
 static bool pressed;
-static bool scanning;
 static pthread_t pth;
     
     switch (level) {
@@ -633,22 +633,22 @@ static pthread_t pth;
             pressed = false;
             
             /* Long press (>2 sec): shutdown */
-            if (tick-time > 2*1000000) {
+            if (tick-pressTime > 2*1000000) {
                 oledBigMessage(0, "MANUAL");
                 oledBigMessage(1, "SHUTDOWN");
                 pito(10, 1);
                 closedown();
-                execlp("halt", "halt", NULL);
+                execlp("poweroff", "poweroff", NULL);
                 return; // should never return
             }
             
             /* Short press: scan wiimotes in another thread, in order to return quickly to caller */           
-            if (!scanning && !pthread_create(&pth, NULL, scanWiimotes, &scanning)) pthread_detach(pth);    
+            if (!scanningWiimote && !pthread_create(&pth, NULL, scanWiimotes, NULL)) pthread_detach(pth);    
             break;
             
         case PI_OFF:  // Sync button pressed
             pressed = true;
-            time = tick;
+            pressTime = tick;
             break;
     }
 }
@@ -808,9 +808,9 @@ uint32_t old_distance;
 
    maxStallCount = 1000/SONARDELAY;  // How many times we have to wait for a SONARDELAY time in 1 second
    old_distance = distance;
-   
+         
    /** Loop for obstacle avoidance **/
-   while (distance < DISTMIN) {
+   while (!scanningWiimote && distance < DISTMIN) {
       /** Check that the user keeps pressing A **/
       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) {  
          fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
@@ -824,8 +824,10 @@ uint32_t old_distance;
 
       if (abs(old_distance - distance)<=2) {  // distance should slowly change while rotating
          stallCount++;
+         //printf("Stopped\n");
          if (stallCount%maxStallCount==0) {  // ca. 1 second without distance change, so we are stalled
             stalled = true;  
+            //printf("Stalled, rotate backwards***\n");
             /** Stalled, move a bit backwards **/
             fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
             gpioSleep(PI_TIME_RELATIVE, 0, 200000);
@@ -840,6 +842,8 @@ uint32_t old_distance;
       else {  // Distance changed while rotating, so the car is not stalled
          stallCount = 0;
          stalled = false;
+         old_distance = distance;  // Take new distance reference for determining stalling
+         //printf("Reset\n");
       }
 
       
@@ -866,13 +870,13 @@ void setupKarr(void)
 {    
    gpioSetMode(KARR_PIN, PI_OUTPUT);
    gpioWrite(KARR_PIN, PI_OFF); 
-   gpioSetTimerFunc(5, KARRDELAY, karrScan);    // Cool KARR LED effect, timer#5
+   gpioSetTimerFunc(TIMER5, KARRDELAY, karrScan);    // Cool KARR LED effect, timer#5
 }
 
 
 void closeKarr(void)
 {
-   gpioSetTimerFunc(5, KARRDELAY, NULL); 
+   gpioSetTimerFunc(TIMER5, KARRDELAY, NULL); 
 }
 
 
@@ -927,7 +931,7 @@ int setup(void)
    gpioSetMode(bocina.pin, PI_OUTPUT);
    gpioWrite(bocina.pin, PI_OFF);
    
-   if (checkBattery) r |= setupPCF8591(PCF8591_I2C, 1, 200);  // Comprueba tensión baterías cada 200 mseg, timer#1
+   if (checkBattery) r |= setupPCF8591(PCF8591_I2C, TIMER1);  // Check battery voltage, timer#1
 
    gpioSetMode(WMSCAN_PIN, PI_INPUT);
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_UP);  // pull-up resistor; button pressed == OFF
@@ -937,8 +941,8 @@ int setup(void)
    r |= setupMotor(&m_dcho);
    r |= sem_init(&semaphore, 0, 0);
    
-   setupLSM9DS1(LSM9DS1_GYR_ACEL_I2C, LSM9DS1_MAG_I2C, calibrateIMU);   // Setup IMU
-   setupBMP085(BMP085_I2C);  // Setup temperature/pressure sensor
+   setupLSM9DS1(LSM9DS1_GYR_ACEL_I2C, LSM9DS1_MAG_I2C, calibrateIMU, TIMER3);   // Setup IMU
+   setupBMP085(BMP085_I2C, TIMER4);  // Setup temperature/pressure sensor
    setupWiimote(); 
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    
