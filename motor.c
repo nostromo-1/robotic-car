@@ -129,7 +129,7 @@ enum timers {TIMER0, TIMER1, TIMER2, TIMER3, TIMER4, TIMER5, TIMER6, TIMER7, TIM
 volatile uint32_t distance = UINT32_MAX;
 volatile int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 volatile bool esquivando; // Car is avoiding obstacle
-volatile bool stalled;    // Car is stalled while avoiding obstacle
+volatile bool stalled;    // Car is stalled: it does not change its distance to object
 volatile bool scanningWiimote;  // User pressed button and car is scanning for wiimotes
 volatile bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
 
@@ -301,7 +301,7 @@ void closeMotor(Motor_t *motor)
 
 /****************** Funciones de control del sensor de distancia de ultrasonidos HC-SR04 **************************/
 
-/* trigger a sonar reading */
+/* trigger a sonar reading every SONARDELAY milliseconds */
 void sonarTrigger(void)
 {
    gpioWrite(sonarHCSR04.trigger_pin, PI_ON);
@@ -314,13 +314,14 @@ void sonarTrigger(void)
 /* callback llamado cuando el pin SONAR_ECHO cambia de estado. Ajusta la variable global 'distancia' */
 void sonarEcho(int gpio, int level, uint32_t tick)
 {
-   static uint32_t startTick, distance_array[NUMPOS], pos_array=0;
-   static uint32_t old_distance = UINT32_MAX;
-   static int firstTime=0;
+   static uint32_t startTick, referenceTick, distance_array[NUMPOS], pos_array;
+   static uint32_t previous_distance, reference_distance;
+   static int firstTime;
    static bool false_echo;
+   static const int maxStalledTime = 1200*1e3;  // Time in microseconds to flag car as stopped (it does not change its distance)
    uint32_t suma, d;
    char str[17];
-   int i, diffTick;
+   int i, diffTick, stalledTime=0;
   
    switch (level) {
    case PI_ON: 
@@ -343,7 +344,10 @@ void sonarEcho(int gpio, int level, uint32_t tick)
               if (firstTime < NUMPOS) { /* The first NUMPOS times until array is filled */
                   firstTime++;
                   break;
-              } else firstTime = -1;  /* Initialisation is over */
+              } else {
+                 firstTime = -1;  /* Initialisation of distance_array is over */
+                 referenceTick = tick;  // Reference for stalled time calculation
+              }
            }
            
            /* Calculate moving average */
@@ -352,17 +356,38 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            
            /* Set global variable "distance" and activate main loop if below threshold */
            distance = sonarHCSR04.distance;  
-           if (distance != old_distance) {
+           if (referenceTick == tick) reference_distance = distance;  // Will only happen once, at the beginning
+           
+           /* Update display if distance changed since last reading */
+           if (distance != previous_distance) {
                snprintf(str, sizeof(str), "Dist (cm): %-3u", distance);
                oledWriteString(0, 0, str, false);
-               old_distance = distance;
+               previous_distance = distance;
            }
            
-           if (!remoteOnly && distance < DISTMIN && !esquivando && !scanningWiimote) {
-               esquivando = true;
-               i = sem_post(&semaphore);  // indica al loop de main que hay un obstáculo delante
-               if (i) perror("Error al activar semáforo");
+           /* Look change in distance to object since reference was taken; 
+              if distance change is small, compute time passed as stalled, otherwise, reset values */
+           if (abs(reference_distance - distance)<=2) stalledTime = tick - referenceTick;
+           else {
+               stalledTime = 0;
+               referenceTick = tick;
+               reference_distance = distance;
            }
+           
+           /* If the stalled time is above threshold, set global variable as true, otherwise as false */
+           stalled = (stalledTime >= maxStalledTime);   
+           
+           /* Activate semaphore to indicate main loop that it must awake;
+              check specific situations first, and then activate it if one of two conditions is met:
+              either the distance to obstacle is below threshold or the car is stalled */
+           if (!remoteOnly && !esquivando && !scanningWiimote) {
+               if (distance < DISTMIN || stalled) {
+                  esquivando = true;
+                  i = sem_post(&semaphore); 
+                  if (i) perror("Error when activating semaphore");
+               }
+           }
+           
            break;
    } 
    // Only executed after PI_OFF
@@ -663,7 +688,7 @@ Sentido_t s_izdo, s_dcho;
    v_izdo = v_dcho = 0;
    s_izdo = s_dcho = ADELANTE;
    
-      /*** Botones A y B, leen la variable global "velocidadCoche" ***/
+   /*** Botones A y B, leen la variable global "velocidadCoche" ***/
    if (mando.wiimote && mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
       v_izdo = v_dcho = velocidadCoche;
       if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
@@ -671,14 +696,14 @@ Sentido_t s_izdo, s_dcho;
     
       /*** Botones LEFT y RIGHT, giran el coche ***/
       if (mando.buttons&CWIID_BTN_RIGHT) {
-         s_dcho = 1 - s_dcho;
+         s_dcho = 1 - s_dcho;  // Invert direction of movement
          if (softTurn) v_dcho = 0;
          else v_dcho = 50;
          v_izdo += 10; 
       } 
             
       if (mando.buttons&CWIID_BTN_LEFT) {
-         s_izdo = 1 - s_izdo;
+         s_izdo = 1 - s_izdo;  // Invert direction of movement
          if (softTurn) v_izdo = 0; 
          else v_izdo = 50;
          v_dcho += 10;                
@@ -796,59 +821,45 @@ static FILE *fp;
 
 /****************** Funciones auxiliares varias **************************/
 
+/**
+The car has found an obstacle in front, move backwards and turn slightly 
+**/
+void retreatBackwards(void)
+{
+   fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
+   gpioSleep(PI_TIME_RELATIVE, 0, 200000);
+   ajustaMotor(&m_izdo, 50, ATRAS);
+   ajustaMotor(&m_dcho, 50, ATRAS);  
+   gpioSleep(PI_TIME_RELATIVE, 0, 400000); // Move a little backwards first
+          
+   rota(CW, ATRAS);  // Rotate backwards
+   gpioSleep(PI_TIME_RELATIVE, 0, velocidadCoche>70?300000:600000);      
+}
+
+
 
 /**
 Loop called when an obstable was detected by the sonar. It tries to avoid it,
 and only returns if it was avoided or the user stopped pressing A.
+The variable "esquivando" will be true when called, main loop will wait for this
+routine to finish. So it has the only control of the car.
 **/
 void avoidObstacle(void)
-{
-int stallCount=0, maxStallCount;
-uint32_t old_distance;
-
-   maxStallCount = 1000/SONARDELAY;  // How many times we have to wait for a SONARDELAY time in 1 second
-   old_distance = distance;
-         
+{        
    /** Loop for obstacle avoidance **/
-   while (!scanningWiimote && distance < DISTMIN) {
+   while (distance < DISTMIN) {
+      /** Check that the button to scan the wiimote was not pressed **/
+      if (scanningWiimote) break;
       /** Check that the user keeps pressing A **/
-      if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) {  
-         fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
-         break;
-      }
+      if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) break;
 
       /**  Rotate the car to avoid obstacle **/
       if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(ACW, ADELANTE);  // con LEFT pulsado, esquiva a la izquierda
       else rota(CW, ADELANTE);  // en caso contrario a la derecha
       gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Sleep for the time to get a new distance measure
 
-      if (abs(old_distance - distance)<=2) {  // distance should slowly change while rotating
-         stallCount++;
-         //printf("Stopped\n");
-         if (stallCount%maxStallCount==0) {  // ca. 1 second without distance change, so we are stalled
-            stalled = true;  
-            //printf("Stalled, rotate backwards***\n");
-            /** Stalled, move a bit backwards **/
-            fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
-            gpioSleep(PI_TIME_RELATIVE, 0, 200000);
-            ajustaMotor(&m_izdo, 50, ATRAS);
-            ajustaMotor(&m_dcho, 50, ATRAS);  
-            gpioSleep(PI_TIME_RELATIVE, 0, 400000); // Move a little backwards first
-            /** Now rotate backwards **/
-            rota(CW, ATRAS);  
-            gpioSleep(PI_TIME_RELATIVE, 0, velocidadCoche>70?300000:600000);
-         }
-      }
-      else {  // Distance changed while rotating, so the car is not stalled
-         stallCount = 0;
-         stalled = false;
-         old_distance = distance;  // Take new distance reference for determining stalling
-         //printf("Reset\n");
-      }
-
-      
+      if (stalled) retreatBackwards();  // stalled is a global variable, set by the sonar
    }
-   stalled = false;
 }
 
 
@@ -894,7 +905,7 @@ void closedown(void)
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_OFF);
    gpioWrite(bocina.pin, PI_OFF);
    gpioSetMode(bocina.pin, PI_INPUT);
-   gpioSetMode(KARR_PIN, PI_INPUT);   
+   gpioSetMode(KARR_PIN, PI_INPUT);
 }
 
 
@@ -1013,7 +1024,7 @@ void main(int argc, char *argv[])
    
    /*** Main control loop ***/
    for (;;) { 
-       esquivando = false;  // señala a sonarEcho que ya se puede volver a enviar la señal de obstáculo encontrado
+       esquivando = false;  // señala a sonarEcho que ya se puede volver a activar el semaforo
        
        /* Adjust car to move */
        if (mando.wiimote || remoteOnly) ajustaCocheConMando();  // wiimote controlled car
@@ -1022,23 +1033,23 @@ void main(int argc, char *argv[])
          ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);             
        }
          
-       r = sem_wait(&semaphore);   // bloquea hasta que encontremos un obstáculo o haya que escanear wiimotes
+       /* Sleep until semaphore awakens us; it will happen in two cases:
+          either the distance to an obstacle is below threshold or the car is stalled */
+       r = sem_wait(&semaphore);  
        if (r) {
-         perror("Error al esperar al semaforo");
+         perror("Error waiting for semaphore");
          continue;
        }
              
-       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Go to obstacle avoidance only if A is pressed
+       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Take action only if A is pressed
      
-       /* Code gets here when an obstacle is found and robot is not already avoiding it */
-       printf("Entra a esquivar\n");
        oledBigMessage(0, "OBSTACLE");               
 
-       avoidObstacle();
+       if (distance < DISTMIN) avoidObstacle();  // Distance below threshold, stalled or not
+       else retreatBackwards(); // Stalled but distance is over threshold; probably an undetected obstacle
        
-       // Hemos esquivado el obstáculo  
+       // Obstacle is avoided, go back to normality
        oledBigMessage(0, NULL);
-       printf("Sale de esquivar\n");
    }
 }
 
