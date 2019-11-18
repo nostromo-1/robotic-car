@@ -18,7 +18,9 @@ Realiza el control principal del coche
 #include <malloc.h>
 #include <string.h>
 #include <stdbool.h>
-  
+#include <sys/prctl.h>
+
+ 
 #include <pigpio.h>
 #include <cwiid.h>
 #include "imu.h"
@@ -55,7 +57,7 @@ extern int optind, opterr, optopt;
 
 
 /***************** Define constants and parameters ****************/
-#define DISTMIN 40        /* distancia en cm a la que entendemos que hay un obstáculo */
+#define DISTMIN 45        /* distancia en cm a la que entendemos que hay un obstáculo */
 #define INITIAL_SPEED 50  /* Entre 0 y 100% */
 #define SONARDELAY 50     /* Time in ms between sonar triggers */
 #define NUMPOS 3          /* Número de medidas de posición del sonar para promediar */
@@ -365,9 +367,10 @@ void sonarEcho(int gpio, int level, uint32_t tick)
                previous_distance = distance;
            }
            
-           /* Look change in distance to object since reference was taken; 
+           /* If car should be moving, look at change in distance to object since reference was taken; 
               if distance change is small, compute time passed as stalled, otherwise, reset values */
-           if (abs(reference_distance - distance)<=2) stalledTime = tick - referenceTick;
+           if ((m_izdo.velocidad || m_dcho.velocidad) &&
+               abs(reference_distance - distance)<=2) stalledTime = tick - referenceTick;
            else {
                stalledTime = 0;
                referenceTick = tick;
@@ -379,7 +382,7 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            
            /* Activate semaphore to indicate main loop that it must awake;
               check specific situations first, and then activate it if one of two conditions is met:
-              either the distance to obstacle is below threshold or the car is stalled */
+              either the distance to obstacle is below threshold or the car is stalled (below or over threshold)*/
            if (!remoteOnly && !esquivando && !scanningWiimote) {
                if (distance < DISTMIN || stalled) {
                   esquivando = true;
@@ -402,7 +405,7 @@ int setupSonarHCSR04(void)
    gpioSetMode(sonarHCSR04.echo_pin, PI_INPUT);
 
    /* update sonar several times a second */
-   if (gpioSetTimerFunc(TIMER0, SONARDELAY, sonarTrigger) ||     /* trigger sonar every 60ms, timer#0 */
+   if (gpioSetTimerFunc(TIMER0, SONARDELAY, sonarTrigger) ||     /* trigger sonar, timer#0 */
         gpioSetAlertFunc(sonarHCSR04.echo_pin, sonarEcho)) {     /* monitor sonar echos */
         fprintf(stderr, "Error al inicializar el sonar!\n");
         return -1;
@@ -658,13 +661,13 @@ static pthread_t pth;
             pressed = false;
             
             /* Long press (>2 sec): shutdown */
-            if (tick-pressTime > 2*1000000) {
+            if (tick-pressTime > 2*1e6) {
                 oledBigMessage(0, "MANUAL");
                 oledBigMessage(1, "SHUTDOWN");
                 pito(10, 1);
                 closedown();
-                execlp("poweroff", "poweroff", NULL);
-                return; // should never return
+                execlp("sudo", "sudo", "poweroff", NULL); 
+                exit(1); // should never return
             }
             
             /* Short press: scan wiimotes in another thread, in order to return quickly to caller */           
@@ -758,7 +761,7 @@ uint32_t current_rcounter =  m_dcho.counter;
 int rpulses, rfreq, rpwm;
   
 int pv, kp=1;  // parameters of PID filter: pv is measured error (process value), kp is proportionality constant
-static const int MINSETUP = 1E6;  // Allow for 1 second (1E6 microseconds) for motors to stabilise before PID control loop works
+static const int minMotorSetupTime = 1E6;  // Allow for 1 second (1E6 microseconds) for motors to stabilise before PID control loop works
   
 static FILE *fp;  
   
@@ -795,8 +798,8 @@ static FILE *fp;
     if (m_izdo.velocidad == 0) return;  // If speed is 0 (in both), do not enter control section
     /*** If time elapsed since speed was set in motor is below a threshold, 
          so that it had no time to stabilise, do not enter ***/ 
-    if (current_tick - m_izdo.speedsetTick < MINSETUP) return;
-    if (current_tick - m_dcho.speedsetTick < MINSETUP) return;
+    if (current_tick - m_izdo.speedsetTick < minMotorSetupTime) return;
+    if (current_tick - m_dcho.speedsetTick < minMotorSetupTime) return;
     
     pv = lpulses - rpulses;
     if (pv<=8 && pv >=-8) return;  // Tolerable error, do not enter control section
@@ -826,6 +829,7 @@ The car has found an obstacle in front, move backwards and turn slightly
 **/
 void retreatBackwards(void)
 {
+   printf("Car seems stalled, move a bit backwards...\n");
    fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
    gpioSleep(PI_TIME_RELATIVE, 0, 200000);
    ajustaMotor(&m_izdo, 50, ATRAS);
@@ -846,6 +850,7 @@ routine to finish. So it has the only control of the car.
 **/
 void avoidObstacle(void)
 {        
+   printf("Obstacle at %d cm, avoiding...\n", distance);
    /** Loop for obstacle avoidance **/
    while (distance < DISTMIN) {
       /** Check that the button to scan the wiimote was not pressed **/
@@ -858,7 +863,7 @@ void avoidObstacle(void)
       else rota(CW, ADELANTE);  // en caso contrario a la derecha
       gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Sleep for the time to get a new distance measure
 
-      if (stalled) retreatBackwards();  // stalled is a global variable, set by the sonar
+      if (stalled) retreatBackwards();  // stalled is a global variable, set by the sonar asynchronously
    }
 }
 
@@ -925,12 +930,22 @@ void terminate(int signum)
 int setup(void)
 {
    int r = 0;
-    
+   
+   // Initialise pigpio library
    if (gpioCfgClock(5, PI_CLOCK_PCM, 0)<0) return 1;   /* Standard settings: Sample rate: 5 us, PCM clock */
    gpioCfgInterfaces(PI_DISABLE_FIFO_IF | PI_DISABLE_SOCK_IF);
    if (gpioInitialise()<0) return 1;
    if (gpioSetSignalFunc(SIGINT, terminate)<0) return 1;
    
+   // Restore signal actions to default, so it dumps core if it happens
+   signal(SIGSEGV, SIG_DFL);  
+   signal(SIGFPE, SIG_DFL); 
+   signal(SIGILL, SIG_DFL);
+   signal(SIGBUS, SIG_DFL);
+   
+   if (setuid(getuid()) < 0) return 1;  // Drop root privileges if setuid
+   prctl(PR_SET_DUMPABLE, 1, 0, 0, 0);  // Set program to dump core if it crashes
+    
    // Inicializa display
    oledInit(DISPLAY_I2C);
    oledSetInversion(true);   // Fill display, as life sign
@@ -971,7 +986,7 @@ void main(int argc, char *argv[])
 {
    int r;
    double volts;
-   
+
    opterr = 0;  // Prevent getopt from outputting error messages
    while ((r = getopt(argc, argv, "crbesf:")) != -1)
        switch (r) {

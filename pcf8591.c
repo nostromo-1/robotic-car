@@ -173,7 +173,8 @@ static unsigned underVoltageTime = 0;
       oledBigMessage(0, "Battery!");   
       oledBigMessage(1, "SHUTDOWN");
       closedown();
-      execlp("poweroff", "poweroff", NULL);   
+      execlp("sudo", "sudo", "poweroff", NULL);   // should never return
+      exit(1);
    }
    
    return;
