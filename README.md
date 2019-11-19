@@ -14,22 +14,22 @@ Communication with the robot is achieved via bluetooth (the wiimote) and wifi (s
 * The Wiimote can be used to:
   * Move forward (A button) or backward (B button)
   * Turn right (RIGHT button) or left (LEFT button)
-  * Increase ('+' button) or decrease speed ('-' button). Speed is signalled in the leds
+  * Increase ('+' button) or decrease speed ('-' button). Speed is signalled in the leds of the Wiimote
   * Activate a buzzer sound (DOWN button)
-  * Play a police sound (UP button) over a loudspeaker. If you push again the UP button while still playing, it stops playing
+  * Play a police siren (UP button) over a loudspeaker. If you push again the UP button while still playing, it stops playing
   * Increase (button ´1´ + button '+') or decrease (button '1' + button '-') volume of sound
 * It continuously monitors distance to an obstacle in the front side
-* If an obstacle is near, it will drive around it. It signals the obstacle by buzzing and stopping. It then turns until no obstacle is found.
-* It monitors battery voltage and shows low battery state by turning off a LED. If battery is low, it also signals it via GPIO, and buzzes as a warning. It also shows battery status as a symbol in the display.
-* If a button is pressed, it starts scanning for wiimotes and connects to one
+* If an obstacle is near, it will drive around it by turning until no obstacle is found. If it detects a stall (like in undetected obstacles, due to a non straight position with respect to the sonar), it will move a little backwards and turn to avoid it
+* It monitors battery voltage and current consumption and shows them in the display, also showing a battery status symbol in the display. If battery is too low, it powers off the raspberry
+* If the scan button is pressed, it starts scanning for wiimotes and connects to one. A long press powers off the raspberry
 * If a pi-camera is attached, it can be used to display the image in a web browser (using https://github.com/silvanmelchior/RPi_Cam_Web_Interface)
-* It displays messages in a display
-* It features a KARR-type scanner
+* It displays status messages in a display
+* It features a KARR-type scanner :-)
 
 ## Parts
 The following parts are needed to build it:
 * Car chasis. For example, http://www.leantec.es/robotica/59-kit-robot-de-4-ruedas-con-ultrasonido.html
-* 4 6V DC motors (if 4WD) or 2 motors (if 2WD)
+* 6V DC motors. If 4WD: 4 motors. If 2WD, then 2 motors (in that case, I use motors with a wheel Hall encoder, [DFRobot FIT0450](https://www.dfrobot.com/product-1457.html))
 * Motor controller: a L298N based circuit board, like http://www.leantec.es/motores-y-controladores/82-l298-controlador-de-motores-con-doble-puente-h.html
 * Distance sensor HC-SR04
 * Display module SSD1306
@@ -42,7 +42,7 @@ The following parts are needed to build it:
 ## Software
 The robot runs on raspbian, I have tested it on the releases from mid 2016. It is programmed in C. It makes use of the pigpio library (http://abyz.co.uk/rpi/pigpio/) for GPIO access, allowing it to play sound and use PWM at the same time. It also needs the bluetooth and alsa libraries.
 The program avoids active loops in order to make a light use of CPU. Its CPU usage is about 7% (which is due to pigpio). It makes use of event loops and semaphores in order to avoid active loops.
-The display control code is included in the software for simplicity, it does not need any display driver library.
+The display control code is included in the software, it does not need any display driver library.
 
 The following packages need to be installed on plain raspbian lite (`sudo apt-get install`):
 * pigpio
@@ -50,7 +50,7 @@ The following packages need to be installed on plain raspbian lite (`sudo apt-ge
 * libcwiid1 libcwiid-dev
 * libasound2-dev
 
-After installing them copy the code files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `sudo ./robot`.
+After installing them copy the code files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `./robot -b -s`. If wheels encoders are used, add `-e`
 
 
   
