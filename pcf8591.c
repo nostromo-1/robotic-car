@@ -106,7 +106,7 @@ It displays a symbol in the display according to the battery status.
 */
 void checkPower(void)
 {
-uint8_t emptybatt_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};
+uint8_t battery_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};  // glyph for empty battery
 int rc, step;
 char adc[4];  // Store ADC values
 char str[17];
@@ -142,21 +142,21 @@ static unsigned underVoltageTime = 0;
    else if (voltage < 7.8) step = 64+32+16+8; // Battery at 80%
    else step = 64+32+16+8+4;  // Battery at 100%
    
-   emptybatt_glyph[2] += step;
-   emptybatt_glyph[3] += step;
-   emptybatt_glyph[4] = emptybatt_glyph[3];
-   emptybatt_glyph[5] = emptybatt_glyph[2];     
+   battery_glyph[2] += step;
+   battery_glyph[3] += step;
+   battery_glyph[4] = battery_glyph[3];
+   battery_glyph[5] = battery_glyph[2];     
     
    // If battery state changed, update battery symbol on display
    if (step!=old_step) {    
-      oledSetBitmap8x8(14*8, 0, emptybatt_glyph);  
+      oledSetBitmap8x8(14*8, 0, battery_glyph);  
       old_step = step;
    }
    
    // Symbol blinks when battery low
    if (step<=64) { 
       if (n++&1) oledSetBitmap8x8(14*8, 0, NULL);
-      else oledSetBitmap8x8(14*8, 0, emptybatt_glyph);
+      else oledSetBitmap8x8(14*8, 0, battery_glyph);
    }
     
    // Update display only if values changed (it is a slow operation)

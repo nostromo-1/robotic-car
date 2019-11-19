@@ -14,6 +14,9 @@ MATHLIB = -lm
 
 
 
-robot: motor.o sound.o oled96.o imu.o pcf8591.o
-	$(CC) -o $@ $^ $(CFLAGS) $(PIOLIBS) $(BTLIBS) $(AUDIOLIBS) $(MATHLIB)	
+robot: motor.o sound.o oled96.o imu.o ekf.o pcf8591.o bmp085.o
+	$(CC) -o $@ $^ $(CFLAGS) $(PIOLIBS) $(BTLIBS) $(AUDIOLIBS) $(MATHLIB) 	
+	sudo chown root $@ 
+	sudo chmod u+s $@
+
 
