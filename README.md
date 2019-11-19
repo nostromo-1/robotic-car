@@ -29,7 +29,7 @@ Communication with the robot is achieved via bluetooth (the wiimote) and wifi (s
 ## Parts
 The following parts are needed to build it:
 * Car chasis. For example, http://www.leantec.es/robotica/59-kit-robot-de-4-ruedas-con-ultrasonido.html
-* 6V DC motors. If 4WD: 4 motors. If 2WD, then 2 motors (in that case, I use motors with a wheel Hall encoder, [DFRobot FIT0450](https://www.dfrobot.com/product-1457.html))
+* 6V DC motors. If 4WD: 4 motors. If 2WD, then 2 motors (in that case, I use motors with a wheel Hall encoder, [DFRobot FIT0450](https://www.dfrobot.com/product-1457.html), in order to make the car run in a straight line using a PID control loop)
 * Motor controller: a L298N based circuit board, like http://www.leantec.es/motores-y-controladores/82-l298-controlador-de-motores-con-doble-puente-h.html
 * Distance sensor HC-SR04
 * Display module SSD1306
@@ -50,7 +50,7 @@ The following packages need to be installed on plain raspbian lite (`sudo apt-ge
 * libcwiid1 libcwiid-dev
 * libasound2-dev
 
-After installing them copy the code files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `./robot -b -s`. If wheels encoders are used, add `-e`
+After installing them copy the code files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `./robot -b -s`. If wheel encoders are used, add `-e` to activate the PID control loop.
 
 
   
