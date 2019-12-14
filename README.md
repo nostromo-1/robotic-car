@@ -41,7 +41,7 @@ The following parts are needed to build it:
 
 ## Software
 The robot runs on raspbian, I have tested it on the releases from mid 2016. It is programmed in C. It makes use of the [pigpio](http://abyz.co.uk/rpi/pigpio/) library for GPIO access, allowing it to play sound and use PWM at the same time. It also needs the bluetooth and alsa libraries.
-The program avoids active loops in order to make a light use of CPU: its CPU usage is about 7% (which is due to pigpio). It is implemented in a multi-threaded program with shared variables and [atomic](https://en.cppreference.com/w/c/language/atomic) semantics to avoid races.
+The program avoids active loops in order to make a light use of CPU: its CPU usage is about 7% (which is due to pigpio). It is implemented in a multi-threaded program with shared variables and makes use of [atomic](https://en.cppreference.com/w/c/language/atomic) semantics to avoid races.
 
 The display control code is included in the software, it does not need any display driver library.
 
@@ -51,7 +51,7 @@ The following packages need to be installed on plain raspbian lite (`sudo apt-ge
 * libcwiid1 libcwiid-dev
 * libasound2-dev
 
-After installing them copy the code files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `./robot -b -s`. If wheel encoders are used, add `-e` to activate the PID control loop.
+After installing them copy the code files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `./robot -b -s`. If wheel encoders are used, add `-e` to activate the PID control loop. It is a SUID program, but it drops privileges at the beginning of execution.
 
 
   
