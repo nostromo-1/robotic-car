@@ -3,7 +3,9 @@ Cödigo fuente del proyecto de coche robótico
 Fichero: motor.c
 Fecha: 21/2/2017
 
-Realiza el control principal del coche
+Realiza el control principal del coche. Este fichero contiene el control de los motores, 
+el controldel mando a distancia, el control del sonar, y la lógica principal.
+El control lo realizan varios threads que se comunican mediante variables atómicas.
 
 
 ***********************************************************************************/
@@ -19,7 +21,7 @@ Realiza el control principal del coche
 #include <string.h>
 #include <stdbool.h>
 #include <sys/prctl.h>
-
+#include <stdatomic.h>
  
 #include <pigpio.h>
 #include <cwiid.h>
@@ -81,65 +83,54 @@ typedef enum {CW, ACW} Rotation_t;
 
 typedef struct {
     const unsigned int en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
-    volatile Sentido_t sentido;   /* ADELANTE, ATRAS */
-    volatile int velocidad;       /* 0 a 100, velocidad (no real) impuesta al motor */
-    volatile int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100 */
-    volatile uint32_t counter, rpm;
-    volatile uint32_t speedsetTick;  // system tick value when velocidad is set
+    Sentido_t sentido;   /* ADELANTE, ATRAS */
+    int velocidad;       /* 0 a 100, velocidad (no real) impuesta al motor */
+    int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100; no need for atomic */
+    int rpm;             /* RPM of motor, only valid if encoder is used */
+    _Atomic uint32_t counter;  /* counter for encoder pulses */
+    uint32_t speedsetTick;     /* system tick value when velocidad is set */
     pthread_mutex_t mutex;
 } Motor_t;
 
 
 typedef struct {
-    cwiid_wiimote_t *wiimote;
-    volatile uint16_t buttons;
+    _Atomic cwiid_wiimote_t *wiimote;
+    _Atomic uint16_t buttons;
 } MandoWii_t;
 
 
 typedef struct {
     const unsigned int pin;
-    volatile bool pitando;
+    bool pitando;
     pthread_mutex_t mutex;
 } Bocina_t;
 
 
 typedef struct {
     const unsigned int trigger_pin, echo_pin;
-    volatile bool triggered;
-    volatile uint32_t distance;
+    _Atomic bool triggered;
+    uint32_t distance;
 } SonarHCSR04_t;
 
 
-/*
-struct Car_t {
-    Motor_t m_izdo, m_dcho;
-    SonarHCSR04_t sonarHCSR04;
-    Bocina_t bocina;
-    MandoWii_t mando;
-    
-    volatile uint32_t distance;
-    volatile int velocidadCoche;
-    volatile bool esquivando;
-
-    
-    
-} car;
-*/
-
+/* Timers used for periodic tasks using the pigpio library function gpioSetTimerFunc */
 enum timers {TIMER0, TIMER1, TIMER2, TIMER3, TIMER4, TIMER5, TIMER6, TIMER7, TIMER8, TIMER9};
 
-volatile uint32_t distance = UINT32_MAX;
-volatile int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
-volatile bool esquivando; // Car is avoiding obstacle
-volatile bool stalled;    // Car is stalled: it does not change its distance to object
-volatile bool scanningWiimote;  // User pressed button and car is scanning for wiimotes
-volatile bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
+/** These are the shared memory variables used for thread intercommunication **/
+_Atomic uint32_t distance = UINT32_MAX;
+_Atomic int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
+_Atomic bool esquivando; // Car is avoiding obstacle
+_Atomic bool stalled;    // Car is stalled: it does not change its distance to object
+_Atomic bool scanningWiimote;  // User pressed button and car is scanning for wiimotes
+_Atomic bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
 
+/* Generic global variables */
 int soundVolume = 96;  // 0 - 100%
 sem_t semaphore;  // Used to synchronize the main loop with the sonar measurement task
 bool remoteOnly, useEncoder, checkBattery, softTurn, calibrateIMU; // program line options
-char *alarmFile = "sounds/police.wav";
+char *alarmFile = "sounds/police.wav";  // File to play when user presses "UP" in wiimote
 
+/* Define and initialize the objects which compose the robotic car */
 MandoWii_t mando;
 
 Bocina_t bocina = {
@@ -174,7 +165,7 @@ Motor_t m_dcho = {
 
 
 
-/* Forward declarations of internal functions */
+/* Forward declarations of internal functions of this module */
 void speedControl(void);  /* Callback called periodically to make motors rotate equally */
 void ajustaCocheConMando(void); /* Read wiimote buttons and adjust speed accordingly */
 void rota(Rotation_t rotation, Sentido_t marcha);  /* Rotate car on the spot */
@@ -309,11 +300,13 @@ void sonarTrigger(void)
    gpioWrite(sonarHCSR04.trigger_pin, PI_ON);
    gpioDelay(10);     /* 10us trigger pulse */
    gpioWrite(sonarHCSR04.trigger_pin, PI_OFF);
-   sonarHCSR04.triggered = true;
+   atomic_store_explicit(&sonarHCSR04.triggered, true, memory_order_relaxed); // sonarHCSR04.triggered = true;
 }
 
 
-/* callback llamado cuando el pin SONAR_ECHO cambia de estado. Ajusta la variable global 'distancia' */
+/* callback called when the SONAR_ECHO pin changes state.
+   It sets global variables "distance" and "stalled", as the only producer of these variables.
+   It sets global variable "esquivando", main loop also sets this variable  */
 void sonarEcho(int gpio, int level, uint32_t tick)
 {
    static uint32_t startTick, referenceTick, distance_array[NUMPOS], pos_array;
@@ -321,12 +314,12 @@ void sonarEcho(int gpio, int level, uint32_t tick)
    static int firstTime;
    static bool false_echo;
    static const int maxStalledTime = 1200*1e3;  // Time in microseconds to flag car as stopped (it does not change its distance)
-   uint32_t suma, d;
+   uint32_t suma, distance_local;
    char str[17];
    int i, diffTick, stalledTime=0;
   
    switch (level) {
-   case PI_ON: 
+   case PI_ON:
            if (sonarHCSR04.triggered) {    
                startTick = tick;
                false_echo = false;
@@ -337,9 +330,9 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            if (false_echo) return;  // Not break
            diffTick = tick - startTick;  // pulse length in microseconds
            if (diffTick > 23000 || diffTick < 60) break;  /* out of range */
-           d = (diffTick*17)/1000;  // distance in cm
+           distance_local = (diffTick*17)/1000;  // distance in cm
 
-           distance_array[pos_array++] = d;
+           distance_array[pos_array++] = distance_local;
            if (pos_array == NUMPOS) pos_array = 0;
  
            if (firstTime>=0) {
@@ -357,35 +350,36 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            sonarHCSR04.distance = suma/NUMPOS;   
            
            /* Set global variable "distance" and activate main loop if below threshold */
-           distance = sonarHCSR04.distance;  
-           if (referenceTick == tick) reference_distance = distance;  // Will only happen once, at the beginning
+           atomic_store_explicit(&distance, sonarHCSR04.distance, memory_order_release);
+           distance_local = atomic_load_explicit(&distance, memory_order_relaxed);  // local copy of variable
+           if (referenceTick == tick) reference_distance = distance_local;  // Will only happen once, at the beginning
            
            /* Update display if distance changed since last reading */
-           if (distance != previous_distance) {
-               snprintf(str, sizeof(str), "Dist (cm): %-3u", distance);
+           if (distance_local != previous_distance) {
+               snprintf(str, sizeof(str), "Dist (cm): %-3u", distance_local);
                oledWriteString(0, 0, str, false);
-               previous_distance = distance;
+               previous_distance = distance_local;
            }
            
            /* If car should be moving, look at change in distance to object since reference was taken; 
               if distance change is small, compute time passed as stalled, otherwise, reset values */
            if ((m_izdo.velocidad || m_dcho.velocidad) &&
-               abs(reference_distance - distance)<=2) stalledTime = tick - referenceTick;
+               abs(reference_distance - distance_local)<=2) stalledTime = tick - referenceTick;
            else {
                stalledTime = 0;
                referenceTick = tick;
-               reference_distance = distance;
+               reference_distance = distance_local;
            }
            
-           /* If the stalled time is above threshold, set global variable as true, otherwise as false */
-           stalled = (stalledTime >= maxStalledTime);   
+           /* If the stalled time is above threshold, set global variable "stalled" as true, otherwise as false */
+           atomic_store_explicit(&stalled, stalledTime >= maxStalledTime, memory_order_release); 
            
            /* Activate semaphore to indicate main loop that it must awake;
               check specific situations first, and then activate it if one of two conditions is met:
               either the distance to obstacle is below threshold or the car is stalled (below or over threshold)*/
            if (!remoteOnly && !esquivando && !scanningWiimote) {
-               if (distance < DISTMIN || stalled) {
-                  esquivando = true;
+               if (distance_local < DISTMIN || stalled) {
+                  atomic_store_explicit(&esquivando, true, memory_order_release);  // Set global variable
                   i = sem_post(&semaphore); 
                   if (i) perror("Error when activating semaphore");
                }
@@ -394,7 +388,7 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            break;
    } 
    // Only executed after PI_OFF
-   sonarHCSR04.triggered = false;
+   atomic_store_explicit(&sonarHCSR04.triggered, false, memory_order_relaxed); 
 }
 
 
@@ -483,7 +477,7 @@ void pito(uint32_t decimas, int modo)
 /******************Funciones de audio ************************/
 
 
-/* Reproduce "file" en otro hilo.
+/* Reproduce "file" en otro hilo si no se está reproduciendo nada. Si es el caso, cancela reproducción y vuelve.
 file debe ser un string invariable, en memoria 
 modo=0; vuelve inmediatamente, sin esperar el final
 modo=1; vuelve después de haber reproducido el fichero de audio */
@@ -493,7 +487,7 @@ void audioplay(char *file, int modo)
     
     /* Si ya estamos reproduciendo algo, manda señal de cancelación al thread de audio */
     if (playing_audio) {
-        cancel_audio = true;
+        atomic_store_explicit(&cancel_audio, true, memory_order_relaxed);  // Signal cancel to sound thread
         return;
     }
     if (pthread_create(&pth, NULL, play_wav, file)) return;
@@ -527,7 +521,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
      for (i = 0; i < mesg_count; i++) {
         switch (mesg[i].type) {
         case CWIID_MESG_BTN:  // Change in buttons
-            mando.buttons = mesg[i].btn_mesg.buttons;
+            atomic_store_explicit(&mando.buttons, mesg[i].btn_mesg.buttons, memory_order_release);
 
             // Save data from accelerometer in a file. Start and end saving when '2' is pressed
             if (previous_buttons&CWIID_BTN_2 && ~mando.buttons&CWIID_BTN_2) save_accel_data();
@@ -539,8 +533,8 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                     if (soundVolume > 100) soundVolume = 100;
                     setVolume(soundVolume);
                 } else {  /* ajusta la velocidad del coche y la marca en leds del mando */
-                    velocidadCoche += 10;
-                    if (velocidadCoche > 100) velocidadCoche = 100;
+                    atomic_fetch_add_explicit(&velocidadCoche, 10, memory_order_relaxed);
+                    if (velocidadCoche > 100) atomic_store_explicit(&velocidadCoche, 100, memory_order_release);
                     cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
                 }
             }
@@ -552,8 +546,8 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                     if (soundVolume < 0) soundVolume = 0;
                     setVolume(soundVolume);
                 } else { /* ajusta la velocidad del coche y la marca en leds del mando */
-                    velocidadCoche -= 10;
-                    if (velocidadCoche < 0) velocidadCoche = 0;
+                    atomic_fetch_sub_explicit(&velocidadCoche, 10, memory_order_relaxed);
+                    if (velocidadCoche < 0) atomic_store_explicit(&velocidadCoche, 0, memory_order_release);
                     cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
                 }
             }
@@ -595,10 +589,11 @@ void setupWiimote(void)
     cwiid_wiimote_t *wiimote;
     bdaddr_t ba;
     
-    if (mando.wiimote) cwiid_close(mando.wiimote);
+    if (mando.wiimote) cwiid_close((cwiid_wiimote_t*)mando.wiimote);
     cwiid_set_err(wiiErr);
-    mando.wiimote = NULL;
-    mando.buttons = 0;
+    atomic_store_explicit(&mando.wiimote, NULL, memory_order_release);
+    atomic_store_explicit(&mando.buttons, 0, memory_order_release);    
+
     oledSetBitmap8x8(15*8, 0, NULL);  // 15: last position in line (0-15), clear icon
     oledBigMessage(1, "Scan... ");
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
@@ -607,20 +602,18 @@ void setupWiimote(void)
     gpioSleep(PI_TIME_RELATIVE, 2, 0);  // para dar tiempo a desconectar el mando si estaba conectado
     ba = *BDADDR_ANY;
     wiimote = cwiid_open_timeout(&ba, 0, 5);  // 5 seconds timeout
+    oledBigMessage(1, NULL);
     if (!wiimote ||
         cwiid_set_rpt_mode(wiimote, CWIID_RPT_BTN | CWIID_RPT_STATUS) || 
         cwiid_set_mesg_callback(wiimote, wiiCallback) ||
         cwiid_enable(wiimote, CWIID_FLAG_MESG_IFC)) {
             fprintf(stderr, "No puedo conectarme al mando de la Wii!\n");
-            mando.wiimote = NULL;
-            oledBigMessage(1, NULL);
             return;  // No es error si no hay wiimote, el coche funciona sin mando
     } 
     
     // wiimote found
-    mando.wiimote = wiimote;
+    atomic_store_explicit(&mando.wiimote, (_Atomic cwiid_wiimote_t*)wiimote, memory_order_release);
     printf("Conectado al mando de la Wii\n");
-    oledBigMessage(1, NULL);
     oledSetBitmap8x8(15*8, 0, bluetooth_glyph);
     cwiid_set_rumble(wiimote, 1);  // señala mediante zumbido el mando sincronizado
     gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos
@@ -631,18 +624,20 @@ void setupWiimote(void)
 
 static void* scanWiimotes(void *arg)
 {
-    scanningWiimote = true;  // signal that scanning is in place   
+    atomic_store_explicit(&scanningWiimote, true, memory_order_release); // signal that scanning is in place
     fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);   // Para el coche mientras escanea wiimotes 
-    velocidadCoche = 0;
+    atomic_store_explicit(&velocidadCoche, 0, memory_order_release);
+
     oledWriteString(12*8, 1, "    ", false); // Borra mensaje de "Auto", si está           
     setupWiimote(); 
-    velocidadCoche = INITIAL_SPEED;   // Nueva velocidad inicial, con o sin mando     
+    atomic_store_explicit(&velocidadCoche, INITIAL_SPEED, memory_order_release); // Nueva velocidad inicial, con o sin mando 
+ 
     if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
         oledWriteString(12*8, 1, "Auto", false);
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
     } 
-    scanningWiimote = false;  // signal that scanning is over
+    atomic_store_explicit(&scanningWiimote, false, memory_order_release);  // signal that scanning is over
     return NULL;
 }
 
@@ -666,8 +661,8 @@ static pthread_t pth;
                 oledBigMessage(1, "SHUTDOWN");
                 pito(10, 1);
                 closedown();
-                execlp("sudo", "sudo", "poweroff", NULL); 
-                exit(1); // should never return
+                execlp("sudo", "sudo", "poweroff", NULL);  
+                exit(1); 
             }
             
             /* Short press: scan wiimotes in another thread, in order to return quickly to caller */           
@@ -738,7 +733,8 @@ Motor_t *motor;
     switch (level) {
         case PI_ON:
         case PI_OFF:
-            motor->counter++;
+            // Increment counter by one in an atomic way (other threads must see correct value)
+            atomic_fetch_add_explicit(&motor->counter, 1, memory_order_relaxed); //  motor->counter++;
             break;           
     }    
 }
@@ -753,11 +749,11 @@ uint32_t current_tick;
 int period;
    
 static uint32_t past_lcounter;  
-uint32_t current_lcounter =  m_izdo.counter;  
+uint32_t current_lcounter;  
 int lpulses, lfreq, lpwm;
 
 static uint32_t past_rcounter;    
-uint32_t current_rcounter =  m_dcho.counter;  
+uint32_t current_rcounter;  
 int rpulses, rfreq, rpwm;
   
 int pv, kp=1;  // parameters of PID filter: pv is measured error (process value), kp is proportionality constant
@@ -766,6 +762,8 @@ static const int minMotorSetupTime = 1E6;  // Allow for 1 second (1E6 microsecon
 static FILE *fp;  
   
     current_tick = gpioTick();
+    current_lcounter =  m_izdo.counter;
+    current_rcounter =  m_dcho.counter;
     if (past_tick == 0) {    // First time speedControl gets called
        past_tick = current_tick;
        //fp = fopen("motors.txt", "w");
@@ -774,22 +772,21 @@ static FILE *fp;
        return;
     }
     period = current_tick - past_tick;
-    
+    past_tick = current_tick;
+        
     /***** Left motor *****/
     lpulses = current_lcounter - past_lcounter;
-    lfreq = (1000000*lpulses)/period;  
+    lfreq = (1E6*lpulses)/period;  
     m_izdo.rpm = lfreq*60/NUMPULSES;
     past_lcounter = current_lcounter;
     //printf("Left motor: pulses=%d, freq=%d, rpm=%d\n", lpulses, lfreq, m_izdo.rpm);
     
     /***** Right motor *****/
     rpulses = current_rcounter - past_rcounter;
-    rfreq = (1000000*rpulses)/period;  
+    rfreq = (1E6*rpulses)/period;  
     m_dcho.rpm = rfreq*60/NUMPULSES;
     past_rcounter = current_rcounter;
     //printf("Right motor: pulses=%d, freq=%d, rpm=%d\n", rpulses, rfreq, m_dcho.rpm);
-        
-    past_tick = current_tick;
     
     if (fp) fprintf(fp, "%u,%d,%d,%d,%d,%d,%d\r\n", current_tick, m_izdo.rpm, m_dcho.rpm, m_izdo.PWMduty, m_dcho.PWMduty, m_izdo.velocidad, m_dcho.velocidad);
     
@@ -829,7 +826,7 @@ The car has found an obstacle in front, move backwards and turn slightly
 **/
 void retreatBackwards(void)
 {
-   printf("Car seems stalled, move a bit backwards...\n");
+   //printf("Car seems stalled, move a bit backwards...\n");
    fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
    gpioSleep(PI_TIME_RELATIVE, 0, 200000);
    ajustaMotor(&m_izdo, 50, ATRAS);
@@ -849,10 +846,10 @@ The variable "esquivando" will be true when called, main loop will wait for this
 routine to finish. So it has the only control of the car.
 **/
 void avoidObstacle(void)
-{        
-   printf("Obstacle at %d cm, avoiding...\n", distance);
+{  
+   //printf("Obstacle at %d cm, avoiding...\n", distance);
    /** Loop for obstacle avoidance **/
-   while (distance < DISTMIN) {
+   while (distance < DISTMIN) {  // distance is atomic, and was set in another thread as a Release sequence
       /** Check that the button to scan the wiimote was not pressed **/
       if (scanningWiimote) break;
       /** Check that the user keeps pressing A **/
@@ -900,7 +897,7 @@ void closeKarr(void)
 void closedown(void)
 {
    closeSonarHCSR04();
-   if (mando.wiimote) cwiid_close(mando.wiimote);
+   if (mando.wiimote) cwiid_close((cwiid_wiimote_t*)mando.wiimote);
    closeMotor(&m_izdo);
    closeMotor(&m_dcho);
    closeSound();
@@ -1039,7 +1036,7 @@ void main(int argc, char *argv[])
    
    /*** Main control loop ***/
    for (;;) { 
-       esquivando = false;  // señala a sonarEcho que ya se puede volver a activar el semaforo
+       atomic_store_explicit(&esquivando, false, memory_order_release); // señala a sonarEcho que ya se puede volver a activar el semaforo
        
        /* Adjust car to move */
        if (mando.wiimote || remoteOnly) ajustaCocheConMando();  // wiimote controlled car
@@ -1060,6 +1057,8 @@ void main(int argc, char *argv[])
      
        oledBigMessage(0, "OBSTACLE");               
 
+       /* distance is atomic, and was set in another thread as a Release sequence: 
+          single producer - multiple consumers, so there is no need for an acquire atomic operation */
        if (distance < DISTMIN) avoidObstacle();  // Distance below threshold, stalled or not
        else retreatBackwards(); // Stalled but distance is over threshold; probably an undetected obstacle
        

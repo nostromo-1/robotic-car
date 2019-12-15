@@ -16,6 +16,7 @@ Reproduce un fichero de audio en formato WAV
 #include <sys/mman.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 
 #include <pigpio.h>
 #include <alsa/asoundlib.h>
@@ -28,7 +29,7 @@ Reproduce un fichero de audio en formato WAV
 #define NUMBER16(p) (*(p) + (*((p)+1)<<8))
 
 
-extern volatile bool playing_audio, cancel_audio;
+extern _Atomic bool playing_audio, cancel_audio;
 static int ampliPIN;   // GPIO pin for amplifier shutdown
 
 
@@ -42,8 +43,8 @@ struct data {
 
 static void cleanup_outer(void *p)
 {
-    playing_audio = false;
-    cancel_audio = false;
+    atomic_store_explicit(&playing_audio, false, memory_order_release);
+    atomic_store_explicit(&cancel_audio, false, memory_order_release);
 }
 
 
@@ -52,7 +53,7 @@ static void cleanup_inner(void *p)
     struct data *arg;
     
     arg = p;
-    if (cancel_audio) snd_pcm_drop(arg->pcm_handle);
+    if (atomic_load_explicit(&cancel_audio, memory_order_relaxed)) snd_pcm_drop(arg->pcm_handle);
     else snd_pcm_drain(arg->pcm_handle);
     snd_pcm_close(arg->pcm_handle);
 
@@ -118,7 +119,7 @@ void setupSound(int gpio)
 
 void closeSound(void)
 {
-   cancel_audio = true;
+   atomic_store_explicit(&cancel_audio, true, memory_order_release);
    gpioWrite(ampliPIN, PI_OFF);     // shutdown amplifier
 }
 
@@ -141,7 +142,7 @@ void* play_wav(void *filename)
     unsigned int channels, rate, bitsPerSample, periodSize, frameSize;
  
  
-    playing_audio = true;
+    atomic_store_explicit(&playing_audio, true, memory_order_release);
     pthread_cleanup_push(cleanup_outer, NULL);
     fd = open(filename, O_RDONLY);
     if (fd == -1) {
@@ -274,7 +275,7 @@ void* play_wav(void *filename)
     
     /* Bucle enviando datos de audio */
     while (rest = mem + filelen - p, rest>0) {
-        if (cancel_audio) break;
+        if (atomic_load_explicit(&cancel_audio, memory_order_relaxed)) break;
         tframes = snd_pcm_writei(pcm_handle, p, rest>=periodSize?frames:rest/frameSize);    
         if (tframes < 0) tframes = snd_pcm_recover(pcm_handle, tframes, 0);
         if (tframes < 0) {
