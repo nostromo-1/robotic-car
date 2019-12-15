@@ -1,6 +1,6 @@
 
 CC=gcc
-CFLAGS=-I.
+CFLAGS=-I. -O
 DEBUG = -g
 DEPS = 
 BTLIBS = -lcwiid -lbluetooth
