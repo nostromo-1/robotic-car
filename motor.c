@@ -314,8 +314,9 @@ void sonarEcho(int gpio, int level, uint32_t tick)
    static int firstTime;
    static bool false_echo;
    static const int maxStalledTime = 1200*1e3;  // Time in microseconds to flag car as stopped (it does not change its distance)
+   static const char displayText[] = "Dist (cm):";
    uint32_t suma, distance_local;
-   char str[17];
+   char str[6];
    int i, diffTick, stalledTime=0;
   
    switch (level) {
@@ -342,6 +343,7 @@ void sonarEcho(int gpio, int level, uint32_t tick)
               } else {
                  firstTime = -1;  /* Initialisation of distance_array is over */
                  referenceTick = tick;  // Reference for stalled time calculation
+                 oledWriteString(0, 0, displayText, false);  // Write fixed text to display once
               }
            }
            
@@ -356,8 +358,8 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            
            /* Update display if distance changed since last reading */
            if (distance_local != previous_distance) {
-               snprintf(str, sizeof(str), "Dist (cm): %-3u", distance_local);
-               oledWriteString(0, 0, str, false);
+               snprintf(str, sizeof(str), "%-3u", distance_local);
+               oledWriteString(8*sizeof(displayText), 0, str, false);  // update only distance number
                previous_distance = distance_local;
            }
            
@@ -926,15 +928,15 @@ void terminate(int signum)
 
 int setup(void)
 {
-   int r = 0;
+int r = 0;
    
    // Initialise pigpio library
    if (gpioCfgClock(5, PI_CLOCK_PCM, 0)<0) return 1;   /* Standard settings: Sample rate: 5 us, PCM clock */
    gpioCfgInterfaces(PI_DISABLE_FIFO_IF | PI_DISABLE_SOCK_IF);
    if (gpioInitialise()<0) return 1;
-   if (gpioSetSignalFunc(SIGINT, terminate)<0) return 1;
+   if (gpioSetSignalFunc(SIGINT, terminate)<0) return 1;  // Call ´terminate´ when Ctrl-C is pressed
    
-   // Restore signal actions to default, so it dumps core if it happens
+   // Restore signal actions to default, so program dumps core if they happen
    signal(SIGSEGV, SIG_DFL);  
    signal(SIGFPE, SIG_DFL); 
    signal(SIGILL, SIG_DFL);
@@ -981,8 +983,8 @@ int setup(void)
 /****************** Main **************************/
 void main(int argc, char *argv[])
 {
-   int r;
-   double volts;
+int r;
+double volts;
 
    opterr = 0;  // Prevent getopt from outputting error messages
    while ((r = getopt(argc, argv, "crbesf:")) != -1)

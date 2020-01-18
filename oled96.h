@@ -46,6 +46,6 @@ int oledSetInversion(bool invert);
 int oledSetBitmap8x8(int x, int y, const uint8_t *graph);
 
 // Write a message in big font on display
-void oledBigMessage(int line, const char *msg);
+int oledBigMessage(int line, const char *msg);
 
 #endif // OLED96_H
