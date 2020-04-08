@@ -4,7 +4,7 @@ Fichero: motor.c
 Fecha: 21/2/2017
 
 Realiza el control principal del coche. Este fichero contiene el control de los motores, 
-el controldel mando a distancia, el control del sonar, y la lógica principal.
+el control del mando a distancia, el control del sonar, y la lógica principal.
 El control lo realizan varios threads que se comunican mediante variables atómicas.
 
 
@@ -29,20 +29,20 @@ El control lo realizan varios threads que se comunican mediante variables atómic
 #include "oled96.h"
 #include "sound.h"
 #include "pcf8591.h"
-#include "bmp085.h"
+#include "bmp280.h"
 #include "robot.h"
 
 extern char *optarg;
 extern int optind, opterr, optopt;
 
 /************ Define pin numbers (Broadcom pin number scheme) *********************/
-#define MI_ENA 17
-#define MI_IN1 27
-#define MI_IN2 22
+#define MI_ENA_PIN 17
+#define MI_IN1_PIN 27
+#define MI_IN2_PIN 22
 
-#define MD_ENA 16
-#define MD_IN1 20
-#define MD_IN2 21
+#define MD_ENA_PIN 16
+#define MD_IN1_PIN 20
+#define MD_IN2_PIN 21
 
 #define SONAR_TRIGGER_PIN 23
 #define SONAR_ECHO_PIN    24
@@ -68,8 +68,9 @@ extern int optind, opterr, optopt;
 #define KARRDELAY 150     /* Time in ms to wait between leds in KARR scan */
 
 
+/***************** I2C bus addresses ****************/
 #define PCF8591_I2C 0x48           /* Dirección i2c del PCF8591 (AD/DA converter) */
-#define BMP085_I2C 0x77            /* Dirección i2c del BMP085 (sensor temperatura/presión) */
+#define BMP280_I2C 0x76            /* Dirección i2c del BMP280 (sensor temperatura/presión) */
 #define DISPLAY_I2C 0x3C           /* Dirección i2c del display SSD1306 */
 #define LSM9DS1_GYR_ACEL_I2C 0x6B  /* Dirección i2c del módulo acelerómetro/giroscopio del IMU LSM9DS1 */
 #define LSM9DS1_MAG_I2C 0x1E       /* Dirección i2c del módulo magnetómetro del IMU LSM9DS1 */
@@ -84,12 +85,12 @@ typedef enum {CW, ACW} Rotation_t;
 typedef struct {
     const unsigned int en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
     Sentido_t sentido;   /* ADELANTE, ATRAS */
-    int velocidad;       /* 0 a 100, velocidad (no real) impuesta al motor */
-    int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100; no need for atomic */
+    int velocidad;       /* 0 a 100, velocidad (no real) objetivo impuesta al motor */
+    int PWMduty;         /* Valor de PWM para alcanzar la velocidad objetivo, 0-100; no need for atomic type */
     int rpm;             /* RPM of motor, only valid if encoder is used */
     _Atomic uint32_t counter;  /* counter for encoder pulses */
-    uint32_t speedsetTick;     /* system tick value when velocidad is set */
-    pthread_mutex_t mutex;
+    uint32_t speedsetTick;     /* system tick value when the variable velocidad is set */
+    pthread_mutex_t mutex;     /* Mutex to avoid collision when several threads access motor */
 } Motor_t;
 
 
@@ -113,24 +114,25 @@ typedef struct {
 } SonarHCSR04_t;
 
 
-/* Timers used for periodic tasks using the pigpio library function gpioSetTimerFunc */
+/* Timers used for periodic tasks (threads) using the pigpio library function gpioSetTimerFunc */
 enum timers {TIMER0, TIMER1, TIMER2, TIMER3, TIMER4, TIMER5, TIMER6, TIMER7, TIMER8, TIMER9};
 
 /** These are the shared memory variables used for thread intercommunication **/
 _Atomic uint32_t distance = UINT32_MAX;
 _Atomic int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 _Atomic bool esquivando; // Car is avoiding obstacle
-_Atomic bool stalled;    // Car is stalled: it does not change its distance to object
-_Atomic bool scanningWiimote;  // User pressed button and car is scanning for wiimotes
+_Atomic bool stalled;    // Car is stalled: it does not change its distance to objects
+_Atomic bool scanningWiimote;  // User pressed scan button and car is scanning for wiimotes
 _Atomic bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
 
 /* Generic global variables */
 int soundVolume = 96;  // 0 - 100%
-sem_t semaphore;  // Used to synchronize the main loop with the sonar measurement task
+sem_t semaphore;  // Used to synchronize the main loop with the sonar measurement thread
 bool remoteOnly, useEncoder, checkBattery, softTurn, calibrateIMU; // program line options
 char *alarmFile = "sounds/police.wav";  // File to play when user presses "UP" in wiimote
 
-/* Define and initialize the objects which compose the robotic car */
+
+/********** Define and initialize the objects which compose the robotic car *********/
 MandoWii_t mando;
 
 Bocina_t bocina = {
@@ -146,19 +148,18 @@ SonarHCSR04_t sonarHCSR04 = {
     .triggered = false
 };
 
-
 Motor_t m_izdo = {
-    .en_pin = MI_ENA,
-    .in1_pin = MI_IN1,
-    .in2_pin = MI_IN2,
+    .en_pin = MI_ENA_PIN,
+    .in1_pin = MI_IN1_PIN,
+    .in2_pin = MI_IN2_PIN,
     .sensor_pin = LSENSOR_PIN,
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
 
 Motor_t m_dcho = {
-    .en_pin = MD_ENA,
-    .in1_pin = MD_IN1,
-    .in2_pin = MD_IN2,
+    .en_pin = MD_ENA_PIN,
+    .in1_pin = MD_IN1_PIN,
+    .in2_pin = MD_IN2_PIN,
     .sensor_pin = RSENSOR_PIN,
     .mutex = PTHREAD_MUTEX_INITIALIZER
 };
@@ -166,7 +167,7 @@ Motor_t m_dcho = {
 
 
 /* Forward declarations of internal functions of this module */
-void speedControl(void);  /* Callback called periodically to make motors rotate equally */
+void speedControl(void);  /* Callback called periodically to make motors rotate at same RPM */
 void ajustaCocheConMando(void); /* Read wiimote buttons and adjust speed accordingly */
 void rota(Rotation_t rotation, Sentido_t marcha);  /* Rotate car on the spot */
 
@@ -267,7 +268,7 @@ int setupMotor(Motor_t *motor)
     r |= gpioSetMode(motor->in1_pin, PI_OUTPUT);
     r |= gpioSetMode(motor->in2_pin, PI_OUTPUT);
     
-    if (gpioSetPWMfrequency(motor->en_pin, 500)<0) r = -1;   /* 500 Hz, low but not audible */
+    if (gpioSetPWMfrequency(motor->en_pin, 500)<0) r = -1;   /* 500 Hz, low but not very audible */
     if (gpioSetPWMrange(motor->en_pin, 100)<0) r = -1;       /* Range: 0-100, real range = 2000 */
     
     if (useEncoder) {
@@ -596,7 +597,7 @@ void setupWiimote(void)
     atomic_store_explicit(&mando.wiimote, NULL, memory_order_release);
     atomic_store_explicit(&mando.buttons, 0, memory_order_release);    
 
-    oledSetBitmap8x8(15*8, 0, NULL);  // 15: last position in line (0-15), clear icon
+    oledSetBitmap8x8(15*8, 0, NULL);  // 15: last position in line (0-15), clear BT icon
     oledBigMessage(1, "Scan... ");
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
     
@@ -616,7 +617,7 @@ void setupWiimote(void)
     // wiimote found
     atomic_store_explicit(&mando.wiimote, (_Atomic cwiid_wiimote_t*)wiimote, memory_order_release);
     printf("Conectado al mando de la Wii\n");
-    oledSetBitmap8x8(15*8, 0, bluetooth_glyph);
+    oledSetBitmap8x8(15*8, 0, bluetooth_glyph);  // Put BT icon
     cwiid_set_rumble(wiimote, 1);  // señala mediante zumbido el mando sincronizado
     gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos
     cwiid_set_rumble(wiimote, 0);
@@ -904,7 +905,7 @@ void closedown(void)
    closeMotor(&m_dcho);
    closeSound();
    closeLSM9DS1();
-   closeBMP085();
+   closeBMP280();
    closeKarr();
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_OFF);
    gpioWrite(bocina.pin, PI_OFF);
@@ -966,8 +967,9 @@ int r = 0;
    r |= setupMotor(&m_dcho);
    r |= sem_init(&semaphore, 0, 0);
    
+   setupBMP280(BMP280_I2C, TIMER4);  // Setup temperature/pressure sensor
    setupLSM9DS1(LSM9DS1_GYR_ACEL_I2C, LSM9DS1_MAG_I2C, calibrateIMU, TIMER3);   // Setup IMU
-   setupBMP085(BMP085_I2C, TIMER4);  // Setup temperature/pressure sensor
+   
    setupWiimote(); 
    gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    
@@ -989,7 +991,7 @@ double volts;
    opterr = 0;  // Prevent getopt from outputting error messages
    while ((r = getopt(argc, argv, "crbesf:")) != -1)
        switch (r) {
-           case 'r':  /* Remote only mode: does not measure distance */
+           case 'r':  /* Remote only mode: only reacts to remote control */
                remoteOnly = true;
                break;
            case 'b':  /* Check battery */
