@@ -598,14 +598,14 @@ void setupWiimote(void)
     atomic_store_explicit(&mando.buttons, 0, memory_order_release);    
 
     oledSetBitmap8x8(15*8, 0, NULL);  // 15: last position in line (0-15), clear BT icon
-    oledBigMessage(1, "Scan... ");
+    oledBigMessage(0, "Scan... ");
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
     
     printf("Pulsa las teclas 1 y 2 en el mando de la Wii...\n");
     gpioSleep(PI_TIME_RELATIVE, 2, 0);  // para dar tiempo a desconectar el mando si estaba conectado
     ba = *BDADDR_ANY;
     wiimote = cwiid_open_timeout(&ba, 0, 5);  // 5 seconds timeout
-    oledBigMessage(1, NULL);
+    oledBigMessage(0, NULL);
     if (!wiimote ||
         cwiid_set_rpt_mode(wiimote, CWIID_RPT_BTN | CWIID_RPT_STATUS) || 
         cwiid_set_mesg_callback(wiimote, wiiCallback) ||
@@ -834,10 +834,11 @@ void retreatBackwards(void)
    gpioSleep(PI_TIME_RELATIVE, 0, 200000);
    ajustaMotor(&m_izdo, 50, ATRAS);
    ajustaMotor(&m_dcho, 50, ATRAS);  
-   gpioSleep(PI_TIME_RELATIVE, 0, 400000); // Move a little backwards first
+   gpioSleep(PI_TIME_RELATIVE, 0, softTurn?400000:800000); // Move a little backwards first
           
-   rota(CW, ATRAS);  // Rotate backwards
-   gpioSleep(PI_TIME_RELATIVE, 0, velocidadCoche>70?300000:600000);      
+   rota(CW, ATRAS);  // And now rotate backwards
+   gpioSleep(PI_TIME_RELATIVE, 0, velocidadCoche>70?300000:600000);  
+   fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);   
 }
 
 
@@ -852,7 +853,7 @@ void avoidObstacle(void)
 {  
    //printf("Obstacle at %d cm, avoiding...\n", distance);
    /** Loop for obstacle avoidance **/
-   while (distance < DISTMIN) {  // distance is atomic, and was set in another thread as a Release sequence
+   while (distance < DISTMIN) {  // distance is atomic, and is set asynchronously in another thread as a Release sequence
       /** Check that the button to scan the wiimote was not pressed **/
       if (scanningWiimote) break;
       /** Check that the user keeps pressing A **/
@@ -861,7 +862,7 @@ void avoidObstacle(void)
       /**  Rotate the car to avoid obstacle **/
       if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(ACW, ADELANTE);  // con LEFT pulsado, esquiva a la izquierda
       else rota(CW, ADELANTE);  // en caso contrario a la derecha
-      gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Sleep for the time to get a new distance measure
+      gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Rotate for the time to get a new distance measure
 
       if (stalled) retreatBackwards();  // stalled is a global variable, set by the sonar asynchronously
    }
@@ -1039,8 +1040,9 @@ double volts;
    
    
    /*** Main control loop ***/
-   for (;;) { 
-       atomic_store_explicit(&esquivando, false, memory_order_release); // señala a sonarEcho que ya se puede volver a activar el semaforo
+   for (;;) {
+       /* Signal to sonarEcho that the semaphore can be activated: car is not 'esquivando' */
+       atomic_store_explicit(&esquivando, false, memory_order_release); 
        
        /* Adjust car to move */
        if (mando.wiimote || remoteOnly) ajustaCocheConMando();  // wiimote controlled car
@@ -1050,7 +1052,7 @@ double volts;
        }
          
        /* Sleep until semaphore awakens us; it will happen in two cases:
-          either the distance to an obstacle is below threshold or the car is stalled */
+          either the distance to an obstacle is below the threshold or the car is stalled */
        r = sem_wait(&semaphore);  
        if (r) {
          perror("Error waiting for semaphore");
@@ -1063,10 +1065,10 @@ double volts;
 
        /* distance is atomic, and was set in another thread as a Release sequence: 
           single producer - multiple consumers, so there is no need for an acquire atomic operation */
-       if (distance < DISTMIN) avoidObstacle();  // Distance below threshold, stalled or not
+       if (distance < DISTMIN) avoidObstacle();  // Distance is below threshold, stalled or not
        else retreatBackwards(); // Stalled but distance is over threshold; probably an undetected obstacle
        
-       // Obstacle is avoided, go back to normality
+       /* Obstacle is avoided, go back to normality */
        oledBigMessage(0, NULL);
    }
 }

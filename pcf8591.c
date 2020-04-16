@@ -33,6 +33,7 @@ dtoverlay=i2c-gpio,i2c_gpio_sda=14,i2c_gpio_scl=15,i2c_gpio_delay_us=3
 */
 #define I2C_BUS 3   
 
+extern _Atomic bool stalled;    // Car is stalled: it does not change its distance to objects
 
 static int i2c_handle = -1;
 static double voltage, current;
@@ -50,6 +51,10 @@ static const double factor_v = 3.3/256*(22000+12100)/12100;
 // Precision: 6 mA due to offset voltage in opamp (600 uV in NPN stage, thus 0.6 mV/0.1) 
 // plus 12 mA due to ADC error (13 mV/1.1)
 static const double factor_i = 3.3/256/(0.1*1100/100);  
+
+
+// Function prototypes
+static void checkPower(void);
 
 
 int setupPCF8591(int addr, unsigned timer)
@@ -104,7 +109,7 @@ Current: It reads the ADC#1, connected to a current sensing circuit (max current
 Low currents (in tens of mA) are overestimated.
 It displays a symbol in the display according to the battery status.
 */
-void checkPower(void)
+static void checkPower(void)
 {
 uint8_t battery_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};  // glyph for empty battery
 int rc, step;
@@ -113,7 +118,7 @@ char str[17];
 
 static char str_old[17];
 static int n, old_step = -1;
-static const unsigned maxUndervoltageTime = 3000;  // Milliseconds with undervoltage before shutdown is triggered
+static const unsigned maxUndervoltageTime = 4000;  // Milliseconds with undervoltage before shutdown is triggered
 static unsigned underVoltageTime = 0;
 
    /* 

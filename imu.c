@@ -4,14 +4,21 @@ IMU control code, for the LSM9DS1 9DoF MARG sensor (Magnetic, Angular Rate and G
 3D accelerometer, 3D gyroscope, 3D magnetometer 
 Controlled by I2C bus (should be 400 KHz). It shows two addresses: 
 the acelerometer/gyroscope and the magnetometer.
+
 It must be placed in the robot car such that the dot on the chip is in the right bottom corner
 when looking at the car from above and from the back to the front.
+
+The LSM9DS1 has a linear acceleration full scale of ±2g/±4g/±8/±16 g, 
+a magnetic field full scale of ±4/±8/±12/±16 gauss and an angular rate of ±245/±500/±2000 dps
+
+Magnetic field strength of Earth is about 0.5 gauss, 500 mGauss, 50 uTeslas or 50000 nTeslas
 
 *****************************************************************************/
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
 #include <stdbool.h>
 #include <pigpio.h>
 #include <math.h>
@@ -42,20 +49,35 @@ static void MadgwickQuaternionUpdate(double ax, double ay, double az, double gx,
 static int i2c_accel_handle = -1;
 static int i2c_mag_handle = -1;
 static FILE *accel_fp;
+static unsigned timerNumber; // The timer used to periodically read the sensor
+
+/* 
+Define ODR of accel/gyro and magnetometer. 
+The accelerometer and gyroscope are both activated and use the same ODR.
+Normal usage is that ODR of accel/gyro is greater than ODR of magnetometer.
+The IMU is read with the magnetometer ODR; the accelerometer and gyroscope data are stored
+by the IMU in a FIFO (32 samples max), allowing a higher ODR in accel/gyro than in magnetometer.
+AG_ODR_952 is only possible if ODR_M = M_ODR_80, otherwise the FIFO overruns.
+*/
+static const enum {AG_ODR_OFF,AG_ODR_14_9,AG_ODR_59_5,AG_ODR_119,AG_ODR_238,AG_ODR_476,AG_ODR_952} ODR_AG = AG_ODR_119; 
+static const double odr_ag_modes[] = {0,14.9,59.5,119,238,476,952};
+
+static const enum {M_ODR_0_625,M_ODR_1_25,M_ODR_2_5,M_ODR_5,M_ODR_10,M_ODR_20,M_ODR_40,M_ODR_80} ODR_M = M_ODR_40; 
+static const double odr_m_modes[] = {0.625,1.25,2.5,5,10,20,40,80};
 
 
 // gRes, aRes, and mRes store the current resolution for each sensor. 
 // Units of these values would be DPS (or g's or Gs's) per ADC tick.
-// This value is calculated as (sensor scale) / (2^15).
+// This value is calculated as (sensor scale) / (2^15), as data resolution is 16 bits, signed.
 static double gRes, aRes, mRes;
 
 /* Store error offset for calibration of accel/gyro and magnetometer */
 static int16_t err_AL[3];  // ex,ey,ez values (error for each axis in accelerometer)
 static int16_t err_GY[3];  // ex,ey,ez values (error for each axis in gyroscope)
 static int16_t err_MA[3];  // ex,ey,ez values (error for each axis in magnetometer, hardiron effects)
-static double scale_MA[3]; // ex,ey,ez values (error for each axis in magnetometer, softiron effects)
-static const char *cal_file = "/boot/calibration.dat";
-static const double declination = +51/60.0;  // Local magnetic declination as given by http://www.magnetic-declination.com/
+static double scale_MA[3] = {1.0, 1.0, 1.0}; // ex,ey,ez values (error for each axis in magnetometer, softiron effects)
+static const char *cal_file = "calibration.dat";
+static const double declination = +1.266;  // Local magnetic declination as given by http://www.magnetic-declination.com/
 
 
 /* Madgwick filter variables */
@@ -76,7 +98,7 @@ In any case, this is the free parameter in the Madgwick filtering and fusion sch
 // gyroscope measurement error in rads/s (start at 40 deg/s)
 #define GyroMeasError (M_PI * (40.0/180.0))
 static const double beta = 1.73205/2 * GyroMeasError; // compute beta, sqrt(3/4)*GyroMeasError
-static const double deltat = 1.0/119;  // Inverse of gyro/accel ODR
+static const double deltat = 1.0/odr_ag_modes[ODR_AG];  // Inverse of gyro/accel ODR
 
 
 // Output variables of module
@@ -84,8 +106,8 @@ double roll, pitch, yaw;
 
 
 /*****************************************************
-Digital filters. LPF is used for filterig magnetic sensor data.
 
+Digital filters. A LPF is used for filterig magnetic sensor data.
 
 ******************************************************/
 /*
@@ -116,9 +138,9 @@ typedef struct {
 
 static LPFFilter filter_x, filter_y, filter_z;
 
-void LPFFilter_init(LPFFilter* f);
-void LPFFilter_put(LPFFilter* f, double input);
-double LPFFilter_get(LPFFilter* f);
+static void LPFFilter_init(LPFFilter* f);
+static void LPFFilter_put(LPFFilter* f, double input);
+static double LPFFilter_get(LPFFilter* f);
 
 static double filter_taps[LPFFILTER_TAP_NUM] = {
   -0.018161596335410146,
@@ -134,23 +156,33 @@ static double filter_taps[LPFFILTER_TAP_NUM] = {
   -0.018161596335410146
 };
 
-void LPFFilter_init(LPFFilter* f) {
+static void LPFFilter_init(LPFFilter* f) {
   int i;
-  for(i = 0; i < LPFFILTER_TAP_NUM; ++i)
-    f->history[i] = 0;
+  double DC_gain = 0;
+  static bool normalized;
+  
+  for (i = 0; i < LPFFILTER_TAP_NUM; ++i) {
+     f->history[i] = 0;
+     DC_gain += filter_taps[i];
+  }
   f->last_index = 0;
+   // Normalize coefficients so the DC gain is 0 dB
+  if (!normalized) {
+     for (i = 0; i < LPFFILTER_TAP_NUM; ++i) filter_taps[i] /= DC_gain;
+     normalized = true;
+  }
 }
 
-void LPFFilter_put(LPFFilter* f, double input) {
+static void LPFFilter_put(LPFFilter* f, double input) {
   f->history[f->last_index++] = input;
-  if(f->last_index == LPFFILTER_TAP_NUM)
-    f->last_index = 0;
+  if (f->last_index == LPFFILTER_TAP_NUM) f->last_index = 0;
 }
 
-double LPFFilter_get(LPFFilter* f) {
+static double LPFFilter_get(LPFFilter* f) {
   double acc = 0;
   int index = f->last_index, i;
-  for(i = 0; i < LPFFILTER_TAP_NUM; ++i) {
+  
+  for (i = 0; i < LPFFILTER_TAP_NUM; ++i) {
     index = index != 0 ? index-1 : LPFFILTER_TAP_NUM-1;
     acc += f->history[index] * filter_taps[i];
   };
@@ -159,8 +191,11 @@ double LPFFilter_get(LPFFilter* f) {
 
 
 
-// Function to calculate heading, using magnetometer readings.
-// It only works if the sensor is lying flat (z-axis normal to Earth).
+/*
+Function to calculate heading, using magnetometer readings.
+It only works if the sensor is lying flat (z-axis normal to Earth).
+It is a non tilt-compensated compass.
+*/
 void printHeading(double mx, double my)
 {
 double heading;
@@ -203,34 +238,34 @@ double sinpitch, cospitch, sinroll, cosroll, rootayaz, rootaxayaz, alpha=0.05;
    cospitch = rootayaz/rootaxayaz;
    
    // now, calculate yaw
+   // yaw angle able to range between -180 and 180, positive westwards
    yaw = atan2(mz*sinroll-my*cosroll, mx*cospitch+my*sinpitch*sinroll+mz*sinpitch*cosroll);
    
    /*********** Calculate tilt angle from vertical: cos(chi)=cos(roll)*cos(pitch) *************/ 
-   chi = 180/M_PI*acos(cosroll*cospitch);
+   chi = acos(cosroll*cospitch);
    
+   /*** Translate angles in radians to degrees ***/
+   chi *= 180/M_PI;
    yaw *= 180/M_PI;
    pitch *= 180/M_PI;
    roll *= 180/M_PI;
    yaw -= declination;
      
-   printf("M/AG Yaw, Pitch, Roll: %3.0f %3.0f %3.0f   Tilt: %3.0f\n", yaw, pitch, roll, chi);
+   printf("M/A-based Yaw, Pitch, Roll: %3.0f %3.0f %3.0f   Tilt: %3.0f\n", yaw, pitch, roll, chi);
 }
 
 
 
  
  
-/* Read the calibration data for acclerometer, gyroscope and magnetometer, if file exists */
+/* Read the calibration data for accelerometer, gyroscope and magnetometer, if file exists */
 static void read_calibration_data(void)
 {
 FILE *fp;  
 int rc;
    
    fp = fopen(cal_file, "r");
-   if (!fp) {
-      perror("Cannot open calibration file");
-      return;
-   }
+   if (!fp) ERR(, "Cannot open calibration file %s: %s", cal_file, strerror(errno));
    
    rc = fscanf(fp, "AL: %d, %d, %d\n", &err_AL[0], &err_AL[1], &err_AL[2]);
    if (rc==EOF || rc!=3) goto rw_error;
@@ -254,16 +289,14 @@ rw_error:
 }
  
 
-/* Write the calibration data for acclerometer, gyroscope and magnetometer into a file */ 
+/* Write the calibration data for accelerometer, gyroscope and magnetometer into a file */ 
 static void write_calibration_data(void)
 {
 FILE *fp;    
 
    fp = fopen(cal_file, "w");
-   if (!fp) {
-      perror(__func__);
-      return;
-   }  
+   if (!fp) ERR(, "Cannot open calibration file %s: %s", cal_file, strerror(errno));
+
    fprintf(fp, "AL: %d, %d, %d\n", err_AL[0], err_AL[1], err_AL[2]);
    fprintf(fp, "GY: %d, %d, %d\n", err_GY[0], err_GY[1], err_GY[2]);   
    fprintf(fp, "MGH: %d, %d, %d\n", err_MA[0], err_MA[1], err_MA[2]);    
@@ -271,6 +304,23 @@ FILE *fp;
    fclose(fp);
 }
 
+
+/* Read and discard several samples of accel/gyro data, useful when initializing */
+static void read_discard_samples(int samples)
+{
+char buf[12]; 
+int i, rc;
+  
+   for (i=0; i<samples;i++) {
+      gpioDelay(lround(1E6/odr_ag_modes[ODR_AG]));   // Wait for new data to arrive
+      rc = i2cReadI2CBlockData(i2c_accel_handle, 0x18, buf, 12);  
+      if (rc < 0) goto rw_error;   
+   }
+   return;
+
+rw_error:
+   ERR(, "Cannot read/write data from IMU");   
+}
 
  
  /* 
@@ -286,12 +336,14 @@ char buf[12];
 int rc, samples=0;   
    
    printf("Calibrating accelerometer and gyroscope. Leave robot car horizontal...\n");
-   gpioDelay(1000000);
+   gpioSleep(PI_TIME_RELATIVE, 1, 0); // 1 second delay
+   
    /* Do 200 readings and average them */
    do {
+      gpioDelay(lround(1E6/odr_ag_modes[ODR_AG]));   // Wait for new data to arrive, acc. ODR selected (8.4 ms for 119 Hz)
       rc = i2cReadByteData(i2c_accel_handle, 0x27);  // Read STATUS_REG register
       if (rc < 0) goto rw_error;  
-      if (rc&0x01) {  // Nuevo dato de acelerometro disponible
+      if (rc&0x01) {  // New accelerometer data available
       
          // Burst read. Accelerometer and gyroscope sensors are activated at the same ODR
          // So read 12 bytes: 2x3x2
@@ -303,16 +355,18 @@ int rc, samples=0;
             right handed, and filter algorithms work correctly */
          gy += buf[1]<<8 | buf[0]; gx += buf[3]<<8 | buf[2]; gz += buf[5]<<8 | buf[4];
          ay += buf[7]<<8 | buf[6]; ax += buf[9]<<8 | buf[8]; az += buf[11]<<8 | buf[10]; 
-         gpioDelay(10000);  // 10 ms delay, new data arrives after 8.4 ms (119 Hz)
       }
    } while (samples<200); 
    
    err_AL[0] = ax/samples; err_AL[1] = ay/samples; err_AL[2] = az/samples-(int32_t)(1/aRes); 
    err_GY[0] = gx/samples; err_GY[1] = gy/samples; err_GY[2] = gz/samples;   
+   
    printf("Done\n");
    return;
   
 rw_error:
+   err_AL[0] = err_AL[1] = err_AL[2] = 0;
+   err_GY[0] = err_GY[1] = err_GY[2] = 0; 
    ERR(, "Cannot read/write data from IMU");
 } 
 
@@ -331,25 +385,21 @@ char buf[12];
 int16_t mx, my, mz; // x, y, and z axis readings of the magnetometer
 int32_t min_x=INT16_MAX, min_y=INT16_MAX, min_z=INT16_MAX;
 int32_t max_x=INT16_MIN, max_y=INT16_MIN, max_z=INT16_MIN;
-int32_t rad_x, rad_y, rad_z;; 
+int32_t rad_x, rad_y, rad_z;
 double rad_mean;
   
    fp = fopen("mag_data.csv", "w");
-   if (!fp) {
-      perror(__func__);
-      return;
-   }
+   if (!fp) ERR(, "Cannot open file: %s", strerror(errno));
+
    fprintf(fp, "X;Y;Z\n");
    printf("Calibrating magnetometer...\n");
    printf("Rotate robot car slowly in all directions...\n");
    start_tick = gpioTick();     
    do {    
-      gpioDelay(10000);  // 10 ms wait
-
-      // Read status register in magnetometer
+      gpioDelay(1000+lround(1E6/odr_m_modes[ODR_M]));   // Wait for new data to arrive, acc. ODR selected (25 ms for 40 Hz)
       rc = i2cReadByteData(i2c_mag_handle, 0x27);  // Read STATUS_REG register  
       if (rc < 0) goto rw_error;        
-      if (rc&0x08) {  // Nuevo dato de magnetometro en XYZ disponible
+      if (rc&0x08) {  // New magnetometer data in XYZ available
 
          /* Read magnetometer data. X and Y axis are exchanged, so that reference system is
          right handed, and filter algorithms work correctly. Sign of Y must be exchanged,
@@ -377,7 +427,7 @@ double rad_mean;
    err_MA[1] = (min_y + max_y)/2;
    err_MA[2] = (min_z + max_z)/2;
        
-   /* Simplified softiron error estimate (assuming axis of elipsoid are parallel to main axis */
+   /* Simplified softiron error estimate (assuming axis of ellipsoid are parallel to main axis */
    rad_x = (max_x - min_x)/2;
    rad_y = (max_y - min_y)/2;   
    rad_z = (max_z - min_z)/2;     
@@ -390,10 +440,10 @@ double rad_mean;
    
 rw_error:
    fclose(fp);
+   err_MA[0] = err_MA[1] = err_MA[2] = 0; 
+   scale_MA[0] = scale_MA[1] = scale_MA[2] = 1.0;   
    ERR(, "Cannot read/write data from IMU");   
 }
-
-
 
 
 
@@ -416,29 +466,29 @@ int n, rc, samples, timediff;
 char *p, str[17], buf[12*32+1], commands[] = {0x07, 0x01, 0x18, 0x01, 0x06, 0x00, 0x00, 0x00};
 uint32_t start_tick, end_tick, mtick;
 static uint32_t old_mtick;
-bool magdata=false;
+bool magdata = false;
 
-// These values are the RAW signed 16-bit readings from the sensors
+/* These values are the RAW signed 16-bit readings from the sensors */
 int16_t gx, gy, gz; // x, y, and z axis raw readings of the gyroscope
 int16_t ax, ay, az; // x, y, and z axis raw readings of the accelerometer
 int16_t mx, my, mz; // x, y, and z axis raw readings of the magnetometer
 
-// Real (scaled and compensated) readings of the sensors
+/* Real (scaled and compensated) readings of the sensors */
 double axr, ayr, azr;
 double gxr, gyr, gzr;
 double mxr, myr, mzr; 
-double mxrf, myrf, mzrf; // filtered values
+double mxrf, myrf, mzrf; // values after LPF
 
    start_tick = gpioTick(); 
    // Read status register in magnetometer, to check if new data is available
-   rc = i2cReadByteData(i2c_mag_handle, 0x27);  // Read STATUS_REG register, ca. 0.25 ms   
+   rc = i2cReadByteData(i2c_mag_handle, 0x27);  // Read STATUS_REG register, needs 0.1 ms   
    if (rc < 0) goto rw_error;        
-   if (rc&0x08) {  // Nuevo dato de magnetometro en XYZ disponible, needs ca. 0.3 ms to read
-      /* Read magnetometer data. X and Y axis are exchanged, and Y is negated, 
+   if (rc&0x08) {  // New magnetometer data in XYZ available
+      /* Read magnetometer data. X and Y axis are exchanged, and then Y is negated, 
          so that the axis coincide with accel/gyro */
          
       // Read 6 bytes (X,Y,Z axis), starting in OUT_X_L_M register
-      rc = i2cReadI2CBlockData(i2c_mag_handle, 0x28, buf, 6); 
+      rc = i2cReadI2CBlockData(i2c_mag_handle, 0x28, buf, 6); // Needs 0.2 ms
       if (rc < 0) goto rw_error;
       magdata = true;  // mark that magnetometer was read, and then read accel/gyro
       my = buf[1]<<8 | buf[0]; mx = buf[3]<<8 | buf[2]; mz = buf[5]<<8 | buf[4];  
@@ -458,9 +508,10 @@ double mxrf, myrf, mzrf; // filtered values
       if (old_mtick) printf("Time between MAG samples: %.1f ms\n", (mtick-old_mtick)/1000.0);
       old_mtick = mtick;
       */
-         
-      //snprintf(str, sizeof(str), "M:%-6.1f mG", 1000*sqrt(mxr*mxr+myr*myr+mzr*mzr));  
-      //oledWriteString(0, 5, str, false);  
+      /*   
+      snprintf(str, sizeof(str), "M:%-6.1f mG", 1000*sqrt(mxrf*mxrf+myrf*myrf+mzrf*mzrf));  
+      oledWriteString(0, 6, str, false);  
+      */
       /*
       snprintf(str, sizeof(str), "MX:%-6.1f mG", mxr*1000);  
       oledWriteString(0, 5, str, false);
@@ -475,22 +526,23 @@ double mxrf, myrf, mzrf; // filtered values
    
    // Read accel/gyro data only if new magnetometer data was available
    if (magdata) {
-      rc = i2cReadByteData(i2c_accel_handle, 0x2F);  // Read FIFO_SRC register
+      rc = i2cReadByteData(i2c_accel_handle, 0x2F);  // Read FIFO_SRC register, needs 0.1 ms
       if (rc < 0) goto rw_error;
       if (rc&0x40) fprintf(stderr, "%s: FIFO overrun!\n", __func__);
-      // samples in FIFO are between 2 and 5, average 3: AG ODR = 119 Hz, M ODR = 40 Hz, 119/40=3
-      samples = rc&0x3F;   // samples could be zero  
+      // samples in FIFO are between 3 and 4, average 3: AG ODR = 119 Hz, M ODR = 40 Hz, 119/40=3
+      samples = rc&0x3F;   // samples in FIFO could be zero  
       //printf("Samples: %d\n", samples);
       
-      if (samples) {
+      if (samples) {  // if FIFO has sth, read it
          /* Burst read. Accelerometer and gyroscope sensors are activated at the same ODR.
             So read all FIFO lines (12 bytes each) in a single I2C transaction 
             using a special function in pigpio library. */
          commands[5] = (12*samples)&0xFF;  // LSb value of number of bytes to read
          commands[6] = (12*samples)>>8;    // MSb value of number of bytes to read
-         rc = i2cZip(i2c_accel_handle, commands, sizeof(commands), buf, sizeof(buf));   // Up to 2.3 ms for 5 samples
+         rc = i2cZip(i2c_accel_handle, commands, sizeof(commands), buf, sizeof(buf));   // Needs 1.2 ms for 4 samples
          if (rc < 0) goto rw_error;         
       }
+      
       for (n=0; n<samples; n++) { 
          p = buf + 12*n;
       
@@ -526,7 +578,7 @@ double mxrf, myrf, mzrf; // filtered values
          if (n==2) oledWriteString(0, 7, str, false);               
          */
          
-         // 3D compass
+         // 3D compass; valid if car does not accelerate (ie, only acceleration is gravity)
          //printOrientation(axr, ayr, azr, mxrf, myrf, mzrf);
          
          // Update sensor fusion filter with the data gathered. Do not filter magnetometer data.
@@ -553,7 +605,7 @@ rw_error:
 Function called from motor.c when initializing, setup() function
 
 ************************************************************/
-int setupLSM9DS1(int accel_addr, int mag_addr, bool calibrate)
+int setupLSM9DS1(int accel_addr, int mag_addr, bool calibrate, unsigned timer)
 {
 int rc;
 int dl, dh;
@@ -580,72 +632,121 @@ uint8_t byte;
    /************************* Set Magnetometer ***********************/
    
    // Set magnetometer, CTRL_REG1_M
-   // TEMP_COMP: No (b0), XY mode: high (b10), ODR: 40 Hz (b110), 0 (b0), ST: No (b0)
-   byte = (0x0<<7) + (0x02<<5) + (0x06<<2) + 0x0; 
+   // TEMP_COMP: Yes (b1), XY mode: ultra (b11), ODR: 40 Hz (b110), 0 (b0), ST: No (b0)
+   byte = (0x01<<7) + (0x03<<5) + (ODR_M<<2) + 0x0; 
    rc = i2cWriteByteData(i2c_mag_handle, 0x20, byte);
    if (rc < 0) goto rw_error;  
    
    // Set magnetometer, CTRL_REG2_M
-   // 0 (b0), FS: 4 G (b00), REBOOT: 0 (b0), SOFT_RST: 0 (b0), 0 (b0), 0 (b0)
+   // 0 (b0), FS: 4 Gauss (b00), REBOOT: 0 (b0), SOFT_RST: 0 (b0), 0 (b0), 0 (b0)
    byte = 0x0; 
    rc = i2cWriteByteData(i2c_mag_handle, 0x21, byte);
    if (rc < 0) goto rw_error;   
    mRes = 4.0/32768;   // G/LSB
    
    // Activate magnetometer, CTRL_REG3_M
-   // I2C: Yes (b0), 0 (b0), LP: No (b0), 0 (b0), 0 (b0), SPI: wo (b0), mode: Continuous (b00)
+   // I2C: enabled (b0), 0 (b0), LP: No (b0), 0 (b0), 0 (b0), SPI: wo (b0), mode: Continuous (b00)
    byte = 0x0; 
    rc = i2cWriteByteData(i2c_mag_handle, 0x22, byte);
    if (rc < 0) goto rw_error; 
       
-   // Activate magnetometer, CTRL_REG4_M
-   // OMZ: Medium (b01), BLE: data LSb at lower address (b0)
-   byte = 0x01<<2; 
+   // Set magnetometer, CTRL_REG4_M
+   // OMZ: ultra (b11), BLE: data LSb at lower address (b0)
+   byte = 0x03<<2; 
    rc = i2cWriteByteData(i2c_mag_handle, 0x23, byte);
    if (rc < 0) goto rw_error;
    
-   /************************* Set Acelerometer / gyroscope ***********************/   
+   // Set magnetometer, CTRL_REG5_M
+   // BDU:  continuous update (b0)
+   byte = 0x00; 
+   rc = i2cWriteByteData(i2c_mag_handle, 0x24, byte);
+   if (rc < 0) goto rw_error;
    
-   // Activate accelerometer, CTRL_REG6_XL
-   // ODR: 50 Hz (b010), FS: 2g (b00), BW_SCAL: auto (b0), BW sel: 408 Hz (b00)
-   byte = (0x02<<5) + (0x0<<3) + 0x0; 
+   /************************* Set Acelerometer / gyroscope ***********************/   
+
+   // Set IMU, CTRL_REG8
+   // BOOT: normal mode (b0), BDU: continuous update (b0), H_LACTIVE: active high (b0),
+   // PP_OD: 0 (b0), SIM: 0 (b0), IF_ADD_INC: enabled (b1), BLE: data LSB @ lower address (b0), SW_RESET: normal mode (b0)
+   byte = 0x04; 
+   rc = i2cWriteByteData(i2c_accel_handle, 0x22, byte);
+   if (rc < 0) goto rw_error; 
+   
+   // Set accelerometer, CTRL_REG5_XL
+   // DEC: no decimation (b00), Zen_XL, Yen_XL, Xen_XL: enabled (b1)
+   byte = (0x00<<6) + (0x07<<3); 
+   rc = i2cWriteByteData(i2c_accel_handle, 0x1F, byte);
+   if (rc < 0) goto rw_error; 
+ 
+   // Set accelerometer, CTRL_REG6_XL
+   // ODR: Power down (b000), FS: 2g (b00), BW_SCAL: auto (b0), BW sel: 408 Hz (b00)
+   byte = (0x00<<5) + (0x0<<3) + 0x0; 
    rc = i2cWriteByteData(i2c_accel_handle, 0x20, byte);
    if (rc < 0) goto rw_error; 
    aRes = 2.0/32768;   // g/LSB
+
+   // Set accelerometer, CTRL_REG7_XL
+   // HR: enabled (b1), DCF: ODR/9 (b10), FDS: internal filter bypassed (b0), HPIS1:  filter bypassed (b0)
+   // both LPF enabled, HPF disabled
+   byte = (0x01<<7) + (0x02<<5) + 0x0; 
+   rc = i2cWriteByteData(i2c_accel_handle, 0x21, byte);
+   if (rc < 0) goto rw_error; 
    
-   // Activate accelerometer and gyro, CTRL_REG1_G
-   // Gyro ODR: 119 Hz LPF1 31 Hz (b011), Gyro scale: 245 dps (b00), 0 (b0), Gyro BW LPF2: 31 Hz (b01)
-   byte = (0x03<<5) + (0x0<<3) + 0x01; 
+   // Set gyro, CTRL_REG4
+   // Zen_G, Yen_G, Xen_G: enabled (b1), LIR_XL1: 0 (b0), 4D_XL1: 0 (b0)
+   byte = 0x07<<3; 
+   rc = i2cWriteByteData(i2c_accel_handle, 0x1E, byte);
+   if (rc < 0) goto rw_error; 
+   
+   // Set gyro, ORIENT_CFG_G
+   // SignX_G, SignX_G, SignX_G: positive sign (b0), Orient: 0 (b000) (Pitch:X, Roll:Y, Yaw:Z)
+   byte = 0x00; 
+   rc = i2cWriteByteData(i2c_accel_handle, 0x13, byte);
+   if (rc < 0) goto rw_error; 
+   
+   // Activate accelerometer and gyro, CTRL_REG1_G. Both use the same ODR
+   // ODR: 119 Hz LPF1 31 Hz (b011), Gyro scale: 245 dps (b00), 0 (b0), Gyro BW LPF2: 31 Hz (b01)
+   // The ODR is variable, acc. ODR_AG, LPF2 is set to be always around 30 Hz (b01) (for ODR 119 Hz and above)
+   byte = (ODR_AG<<5) + (0x0<<3) + 0x01; 
    rc = i2cWriteByteData(i2c_accel_handle, 0x10, byte);
    if (rc < 0) goto rw_error; 
    gRes = 245.0/32768;   // dps/LSB
    
    // Set gyro, CTRL_REG2_G
-   // INT_SEL: 0 (b00), OUT_SEL: 0 (b00) (output after LPF1)
-   byte = 0x0; 
+   // INT_SEL: 0 (b00), OUT_SEL: 0 (b10) (output after LPF2)
+   byte = 0x02; 
    rc = i2cWriteByteData(i2c_accel_handle, 0x11, byte);
    if (rc < 0) goto rw_error; 
    
    // Set gyro, CTRL_REG3_G
-   // LP_mode: disabled (b0), HP_EN: disabled (b0), HPCF_G: 1 Hz (b0010) 
-   byte = (0x0<<6) + 0x02; 
+   // LP_mode: disabled (b0), HP_EN: disabled (b0), HPCF_G: 0.5 Hz for 119 Hz ODR (b0100) 
+   // both LPF enabled, HPF disabled
+   byte = (0x0<<7) + (0x0<<6) + 0x04; 
    rc = i2cWriteByteData(i2c_accel_handle, 0x12, byte);
    if (rc < 0) goto rw_error;  
  
-   // Set FIFO, CTRL_REG9
-   // 0 (b0), SLEEP_G: disabled (b0), 0 (b0), FIFO_TEMP_EN: no (b0), 
-   // DRDY_mask_bit: disabled (b0), I2C_DISABLE: both (b0), FIFO_EN: yes (b1), STOP_ON_FTH: no (b0)
-   byte = 0x02; 
-   rc = i2cWriteByteData(i2c_accel_handle, 0x23, byte);
-   if (rc < 0) goto rw_error;   
+   /* Now, set FIFO in continuous mode */ 
+   // First, empty and reset FIFO, in case it was active, so we start afresh
+   rc = i2cWriteByteData(i2c_accel_handle, 0x2E, 0x00);  // Reset existing FIFO content by selecting FIFO Bypass mode 
+   if (rc < 0) goto rw_error;  
    
    // Set FIFO, FIFO_CTRL
-   // FMODE: continous mode (b110), threshold: 0 (b00000)
+   // FMODE: continuous mode (b110), threshold: 0 (b00000)
    byte = (0x06<<5) + 0x0; 
    rc = i2cWriteByteData(i2c_accel_handle, 0x2E, byte);
    if (rc < 0) goto rw_error; 
 
+   // Activate FIFO, CTRL_REG9
+   // SLEEP_G: disabled (b0), FIFO_TEMP_EN: no (b0), 
+   // DRDY_mask_bit: disabled (b0), I2C_DISABLE: both (b0), FIFO_EN: yes (b1), STOP_ON_FTH: no (b0)
+   byte = 0x02; 
+   rc = i2cWriteByteData(i2c_accel_handle, 0x23, byte);
+   if (rc < 0) goto rw_error;  
+   
+   /* Initial samples after FIFO activation and after power up (Table 11) have to be discarded */
+   read_discard_samples(20);  
+      
    /************************** Read Termometer ***********************/
+   /*
    // Read temperature  
    dl = rc = i2cReadByteData(i2c_accel_handle, 0x15);  // Read OUT_TEMP_L register   
    if (rc < 0) goto rw_error;
@@ -653,12 +754,14 @@ uint8_t byte;
    if (rc < 0) goto rw_error;
    temp = dh<<8 | dl;  // Raw value read from device, it can be negative
    printf("Temperatura del LSM9DS1: %.1f grados\n", 25+(double)temp/16.0);
+   */
    
    /************************** Handle calibration ********************/
    if (calibrate) {
       calibrate_accel_gyro();
       calibrate_magnetometer();
       write_calibration_data();
+      gpioSleep(PI_TIME_RELATIVE, 1, 0);  // Sleep 1 second, so the user can continue the start process
    }
    else read_calibration_data();
    
@@ -666,7 +769,8 @@ uint8_t byte;
    // Initialize low pass filter for magnetometer data
    LPFFilter_init(&filter_x); LPFFilter_init(&filter_y); LPFFilter_init(&filter_z);
    // Start the IMU-reading thread
-   rc = gpioSetTimerFunc(3, 20, imuRead);  // 20ms clock, timer#3
+   timerNumber = timer;
+   rc = gpioSetTimerFunc(timerNumber, 1+lround(1000.0/odr_m_modes[ODR_M]), imuRead);  // Read IMU with magnetometer ODR, timer#3
    if (rc<0) ERR(-1, "Cannot set timer for IMU");
    
    return 0;
@@ -681,7 +785,11 @@ rw_error:
 
 void closeLSM9DS1(void)
 {
-   gpioSetTimerFunc(3, 10, NULL);
+   gpioSetTimerFunc(timerNumber, 20, NULL);
+   i2cWriteByteData(i2c_mag_handle, 0x22, 0x03);   // Power down magnetometer
+   i2cWriteByteData(i2c_accel_handle, 0x23, 0x00); // Disable FIFO
+   i2cWriteByteData(i2c_accel_handle, 0x10, 0x00); // Power down accel/gyro
+   
    if (i2c_accel_handle>=0) i2cClose(i2c_accel_handle);
    if (i2c_mag_handle>=0) i2cClose(i2c_mag_handle);   
    i2c_accel_handle = -1;
@@ -732,11 +840,14 @@ int fd;
    else {
       strcpy(filename, template);
       fd = mkstemps(filename, 4);  // Generate unique file. Suffix length is 4: ".csv"
-      if (fd == -1) perror(__func__);
+      if (fd == -1) ERR(, "Cannot create file: %s", strerror(errno))
       else {
          accel_fp = fdopen(fd, "w");
-         if (accel_fp) printf("Saving accelerometer data in file %s\n", filename);   
-         if (accel_fp) fprintf(accel_fp, "X; Y; Z\n");
+         if (accel_fp == NULL) ERR(, "Cannot open file %s: %s", filename, strerror(errno))
+         else {
+            printf("Saving accelerometer data in file %s\n", filename); 
+            fprintf(accel_fp, "X; Y; Z\n");
+         }
       }
    }
 }

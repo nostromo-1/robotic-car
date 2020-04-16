@@ -15,9 +15,12 @@ Temperature typical accuracy +-0.5°C at 25°C
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <stdbool.h>
+#include <string.h>
 #include <math.h>
 #include <pigpio.h>
 
+#include "oled96.h"
 #include "bmp280.h"
 
 
@@ -38,18 +41,18 @@ static unsigned timerNumber; // The timer used to periodically read the sensor
 
 /************
 Define workig mode, oversampling and filter. 
-Settings are done for the "Indoor navigation" application, described in Table 7 of the data sheet
+Settings are done for the "Handheld device" application, described in Table 7 of the data sheet
 Oversampling Setting
 0: Skip, 1: ultra low power, 2: low power, 3: standard, 4: high resolution, 5: ultra high resolution
 *************/
 
 static const enum {SLEEP,FORCED,FORCED2,NORMAL} mode = NORMAL;
 static const enum {SKIP,ULP,LP,STD,HR,UHR} osrs_t = LP, osrs_p = UHR;
-static const enum {F_OFF,F_2,F_4,F_8,F_16} filter = F_16;
+static const enum {F_OFF,F_2,F_4,F_8,F_16} filter = F_OFF;
 
 /* Define list of standby times for normal mode, rounded up, in milliseconds */
 static const int t_standby[] = {1, 63, 125, 250, 500, 1000, 2000, 4000};  // 1 ms will not work
-static const int t_sb = 4;  // The 4th value in t_standby is used
+static const int t_sb = 3;  // The value with this index in t_standby is used
 
 
 /* Compensation parameters read from the chip */
@@ -58,14 +61,31 @@ static int16_t dig_T2, dig_T3;
 static uint16_t dig_P1;
 static int16_t dig_P2, dig_P3, dig_P4, dig_P5, dig_P6, dig_P7, dig_P8, dig_P9;
 
-static int32_t temp;
-static uint32_t press;
-static const double p0 = 1013.25;     // Pressure at sea level (hPa)
+static double pressure, temperature, p0, altitude;
+static bool notFirstTime;
+
+
+/* Kalman filter  variables and types */
+typedef struct {
+  const double err_measure;   // Measurement Uncertainty: How much do we expect to our measurement vary
+  const double q;             // Process Variance: usually a small number between 0.001 and 1 - how fast your measurement moves. Recommended 0.01
+  double err_estimate;        // Estimation Uncertainty: Can be initilized with the same value as e_mea since the kalman filter will adjust its value
+  double kalman_gain;
+  double last_estimate, current_estimate;
+} KalmanFilter_t;
+
+
+static KalmanFilter_t pressureFilter = {
+    .err_measure = 2.0,  
+    .err_estimate = 2.0,
+    .q = 0.6
+};
+
 
 
 /* Function prototypes */
 static void readSensor(void);
-
+static double updateEstimate(KalmanFilter_t *filter, double mea);
 
 
 
@@ -129,7 +149,7 @@ rw_error:
 
 void closeBMP280(void)
 {
-   gpioSetTimerFunc(timerNumber, t_standby[t_sb], NULL);  // Stop reading thread
+   gpioSetTimerFunc(timerNumber, 500, NULL);  // Stop reading thread
    i2cWriteByteData(i2c_handle, 0xF4, 0);  // Set sensor to sleep mode
    if (i2c_handle>=0) i2cClose(i2c_handle);   
    i2c_handle = -1;    
@@ -152,7 +172,7 @@ typedef int64_t BMP280_S64_t;
 static BMP280_S32_t t_fine;
 static BMP280_S32_t bmp280_compensate_T_int32(BMP280_S32_t adc_T)
 {
-   BMP280_S32_t var1, var2, T;
+BMP280_S32_t var1, var2, T;
    
    var1 = ((((adc_T>>3) - ((BMP280_S32_t)dig_T1<<1))) * ((BMP280_S32_t)dig_T2)) >> 11;
    var2 = (((((adc_T>>4) - ((BMP280_S32_t)dig_T1)) * ((adc_T>>4) - ((BMP280_S32_t)dig_T1))) >> 12) * ((BMP280_S32_t)dig_T3)) >> 14;
@@ -166,7 +186,7 @@ static BMP280_S32_t bmp280_compensate_T_int32(BMP280_S32_t adc_T)
 // Output value of "24674867" represents 24674867/256 = 96386.2 Pa = 963.862 hPa
 static BMP280_U32_t bmp280_compensate_P_int64(BMP280_S32_t adc_P)
 {
-   BMP280_S64_t var1, var2, p;
+BMP280_S64_t var1, var2, p;
    
    var1 = ((BMP280_S64_t)t_fine) - 128000;
    var2 = var1 * var1 * (BMP280_S64_t)dig_P6;
@@ -190,41 +210,85 @@ static void readSensor(void)
 {
 int rc;
 uint32_t raw_p, raw_t;
-char buf[6];   
-double t, p, a;
-  
+char buf[6], str[17];   
+double p;
+static char str_old[17];
+
    rc = i2cReadI2CBlockData(i2c_handle, 0xF7, buf, sizeof(buf));  // Burst read temperature and pressure values
-   if (rc < 0) goto rw_error; 
+   if (rc < 0) ERR(, "Cannot read data from BMP280"); 
    raw_p = ((uint32_t)buf[0]<<12) | ((uint32_t)buf[1]<<4) | ((uint32_t)buf[2]>>4);
    raw_t = ((uint32_t)buf[3]<<12) | ((uint32_t)buf[4]<<4) | ((uint32_t)buf[5]>>4);
 
-   temp = bmp280_compensate_T_int32((int32_t)raw_t);    // Temperature must be calculated before pressure  
-   //printf("Temperature: %d\n", temp/100);
-   press = bmp280_compensate_P_int64((int32_t)raw_p);   
-   //printf("Pressure: %d\n", press/25600);
+   // Calculate compensated values. Temperature must be calculated before pressure
+   temperature = bmp280_compensate_T_int32((int32_t)raw_t)/100.0;  // In degrees centigrade  
+   p = bmp280_compensate_P_int64((int32_t)raw_p)/25600.0;   // In hPa or mbar
+   if (p == 0) ERR(, "Invalid data read from BMP280"); 
+   //printf("P:%.2f\n", p);
    
+   if (!notFirstTime) {  
+      pressure = p0 = p;   // The first time we read the sensor, we save the pressure as reference in p0
+      pressureFilter.last_estimate = p;  // Initialize Kalman filter
+      notFirstTime = true;
+   }
+   else pressure = updateEstimate(&pressureFilter, p);  // Kalman filter
+      
+   altitude = round(10*8.43 * (p0 - pressure))/10;  // Valid near sea level
    
-   getAtmosfericData(&t, &p, &a);
-   printf("T:%.2f P:%.2f\n", t, p);
+   //printf("T:%.2f P:%.2f A:%.1f\n", temperature, pressure, altitude);
+   
+   // Update display only if values changed (it is a slow operation)
+   snprintf(str, sizeof(str), "%.1fC %.1fhPa", temperature, pressure);
+   if (strcmp(str, str_old)) {
+      oledWriteString(0, 7, str, false);
+      strcpy(str_old, str);
+   }  
+      
    return;
-   
-rw_error:
-   press = 0;
-   if (i2c_handle>=0) i2cClose(i2c_handle);
-   i2c_handle = -1;
-   ERR(, "Cannot read data from BMP280");     
 }
 
 
 
-int getAtmosfericData(double *temperature, double *pressure, double *altitude)
+int getAtmosfericData(double *t, double *p, double *a)
 {
-   if (press == 0 || i2c_handle < 0) return -1;   // Invalid data
-   *temperature = temp/100.0;   // In degrees centigrade
-   *pressure = press/25600.0;   // In hPa or mbar
-   *altitude = 44330.0*(1 - pow(*pressure/p0, 1/5.255));  // In meters
+   *t = temperature;
+   *p = pressure;
+   *a = altitude;
    
    return 0;
 }
+
+
+
+/********
+Kalman filter for single variable model
+Based on the following software
+
+Copyright (c) 2017 Denys Sene
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+**********/
+
+
+
+static double updateEstimate(KalmanFilter_t *filter, double mea)
+{
+  filter->kalman_gain = filter->err_estimate/(filter->err_estimate + filter->err_measure);
+  filter->current_estimate = filter->last_estimate + filter->kalman_gain * (mea - filter->last_estimate);
+  filter->err_estimate =  (1.0 - filter->kalman_gain)*filter->err_estimate + filter->q * fabs(filter->last_estimate - filter->current_estimate);
+  filter->last_estimate = filter->current_estimate;
+
+  return filter->current_estimate;
+}
+
+
+
 
 
