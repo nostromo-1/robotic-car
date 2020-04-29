@@ -40,17 +40,19 @@ static double voltage, current;
 static const unsigned millis = 200;  // Time between calls to checkPower in milliseconds
 static unsigned timerNumber;         // The timer used to periodically read the ADC
 
-// 3.3 is the voltage reference, 256 are the steps (8 bits ADC resolution)
-// 22000 and 12100 are the precision (1%) resistors in series connected to ADC#1 for battery voltage
-// Precision: about 13 mV (3.3/256) due to ADC times 2.82, which is about 37 mV
-static const double factor_v = 3.3/256*(22000+12100)/12100; 
- 
-// 1100 and 100 are the precision (1%) resistors in the current sensing circuit connected to ADC#2
+// 3.3 is the voltage reference, 255 are the steps (8 bits ADC resolution)
+// 22000 and 12100 are the precision (1%) resistors in series connected to ADC#0 for battery voltage
+// Precision: about 13 mV (3.3/255) quantisation error due to ADC, times 2.82 (resistors), 
+// which is a total error of about +-18 mV (+-13/2*2.82)
+static const double factor_v = 3.3/255*(22000+12100)/12100; 
+static const double factor_v2 = 3.3/255*2; // ADC#3 is connected to the middle point of the battery pack, via 2 22k resistors
+
+// 1100 and 100 are the precision (1%) resistors in the current sensing circuit connected to ADC#1
 // 0.1 is the sensing resistor (1%)
 // current = voltage measured / 1.1
 // Precision: 6 mA due to offset voltage in opamp (600 uV in NPN stage, thus 0.6 mV/0.1) 
-// plus 12 mA due to ADC error (13 mV/1.1)
-static const double factor_i = 3.3/256/(0.1*1100/100);  
+// plus 12 mA due to ADC error (13 mV/1.1), which is a total error of about +-12 mA
+static const double factor_i = 3.3/255/(0.1*1100/100);  
 
 
 // Function prototypes
@@ -115,7 +117,7 @@ uint8_t battery_glyph[] = {0, 254, 130, 131, 131, 130, 254, 0};  // glyph for em
 int rc, step;
 char adc[4];  // Store ADC values
 char str[17];
-
+double bat1, bat2;
 static char str_old[17];
 static int n, old_step = -1;
 static const unsigned maxUndervoltageTime = 4000;  // Milliseconds with undervoltage before shutdown is triggered
@@ -138,7 +140,9 @@ static unsigned underVoltageTime = 0;
    */
 
    voltage = factor_v*adc[2];
-   current = factor_i*adc[3];  
+   current = factor_i*adc[3]; 
+   bat1 = factor_v2*adc[1];
+   bat2 = voltage - bat1;
    
    if (voltage < 6.2) step = 0;        // Battery at 0%
    else if (voltage < 6.6) step = 64;  // Battery at 20%
@@ -172,14 +176,14 @@ static unsigned underVoltageTime = 0;
    }
 
    // Shutdown if voltage is too low for a long period
-   if (voltage < 5.6) underVoltageTime += millis;
+   if (bat1<2.8 || bat2<2.8) underVoltageTime += millis;
    else underVoltageTime = 0;
    if (underVoltageTime >= maxUndervoltageTime) {  
       oledBigMessage(0, "Battery!");   
       oledBigMessage(1, "SHUTDOWN");
-      closedown();
-      execlp("sudo", "sudo", "poweroff", NULL);   // should never return
-      exit(1);
+      //closedown();
+      //execlp("sudo", "sudo", "poweroff", NULL);   // should never return
+      //exit(1);
    }
    
    return;
