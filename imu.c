@@ -63,7 +63,7 @@ static unsigned timerNumber; // The timer used to periodically read the sensor
 /* 
 Define ODR of accel/gyro and magnetometer. 
 The accelerometer and gyroscope are both activated and use the same ODR.
-Normal usage is that ODR of accel/gyro is greater than ODR of magnetometer.
+Upsampling requires that ODR of accel/gyro is greater than ODR of magnetometer.
 The IMU is read with the magnetometer ODR; the accelerometer and gyroscope data are stored
 by the IMU in a FIFO (32 samples max), allowing a higher ODR in accel/gyro than in magnetometer.
 In order for the algorithms to work, AG_ODR must be higher or equal than M_ODR. If it is much higher, the FIFO will overrun.
@@ -76,6 +76,8 @@ static const double odr_ag_modes[] = {0,14.9,59.5,119,238,476,952};
 static const enum {M_ODR_0_625,M_ODR_1_25,M_ODR_2_5,M_ODR_5,M_ODR_10,M_ODR_20,M_ODR_40,M_ODR_80} ODR_M = M_ODR_40; 
 static const double odr_m_modes[] = {0.625,1.25,2.5,5,10,20,40,80};
 
+/* upsampling_factor is the ratio between both ODRs */
+static int upsampling_factor;
 
 // gRes, aRes, and mRes store the current resolution for each sensor. 
 // Units of these values would be DPS (or g's or Gs's) per ADC tick.
@@ -116,7 +118,7 @@ static const double deltat = 1.0/odr_ag_modes[ODR_AG];  // Inverse of gyro/accel
 
 
 // Output variables of module
-double roll, pitch, yaw;
+double roll, pitch, yaw, tilt;
 
 
 /* Prototypes */
@@ -127,7 +129,6 @@ static double ellipsoid_fit(SampleList_t *sample_list);
 static double compute_error(double Vx, double Vy, double Vz, double A, double B, double C, 
                             double Bm, SampleList_t *sample_list);
 static void compute_deviation(double *deviations, SampleList_t *sample_list);
-static void calculateAttitude(void);
 static void MadgwickQuaternionUpdate(double ax, double ay, double az, double gx, double gy, double gz, 
                                      double mx, double my, double mz);
                                      
@@ -138,7 +139,7 @@ Digital FIR filter. A LPF is used for filterig magnetometer data.
 It is used to interpolate after upsampling from ODR_M to ODR_AG.
 It is designed to work with these combinations: (x3, x6)
 ODR_M=80, ODR_AG=476; ODR_M=80, ODR_AG=238;
-ODR_M=40, ODR_AG=240; ODR_M=40, ODR_AG=119; 
+ODR_M=40, ODR_AG=238; ODR_M=40, ODR_AG=119; 
 ODR_M=20, ODR_AG=119; ODR_M=20, ODR_AG=59.5; 
 ODR_M=10, ODR_AG=59.5; 
 
@@ -153,21 +154,21 @@ sampling frequency: 240 Hz
 * 0 Hz - 4 Hz
   gain = 1
   desired ripple = 2 dB
-  actual ripple = 1.0131674797353432 dB
+  actual ripple = 1.0141307953166252 dB
 
 * 5 Hz - 19 Hz
   gain = 1
   desired ripple = 35 dB
-  actual ripple = 33.75682519455038 dB
+  actual ripple = 33.758521533154735 dB
 
 * 20 Hz - 120 Hz
   gain = 0
   desired attenuation = -40 dB
-  actual attenuation = -43.62200210489298 dB
+  actual attenuation = -43.613766226277974 dB
 
 */
 
-#define LPFILTER_TAP_NUM 23
+#define LPFILTER_TAP_NUM 24
 
 typedef struct {
   double history[LPFILTER_TAP_NUM];
@@ -181,29 +182,30 @@ static void LPFilter_put(LPFilter* f, double input);
 static double LPFilter_get(LPFilter* f);
 
 static double filter_taps[LPFILTER_TAP_NUM] = {
-  0.005707016062138497,
-  0.010715189817492391,
-  0.015101414621487065,
-  0.024543739472862428,
-  0.032518445733322646,
-  0.04378363228995259,
-  0.05336442162376967,
-  0.06422688759165009,
-  0.0724052280813546,
-  0.07998223708243157,
-  0.08382489304923027,
-  0.08591035875329574,
-  0.08382489304923027,
-  0.07998223708243157,
-  0.0724052280813546,
-  0.06422688759165009,
-  0.05336442162376967,
-  0.04378363228995259,
-  0.032518445733322646,
-  0.024543739472862428,
-  0.015101414621487065,
-  0.010715189817492391,
-  0.005707016062138497
+  0.0017433948030936106,
+  0.009143190985861756,
+  0.012133516280499421,
+  0.01983655704542007,
+  0.02830242809740451,
+  0.03812682806131509,
+  0.048540195172121076,
+  0.05892094411702151,
+  0.06848428950018577,
+  0.07647321877548367,
+  0.08222112771837956,
+  0.08523022650867189,
+  0.08523022650867189,
+  0.08222112771837956,
+  0.07647321877548367,
+  0.06848428950018577,
+  0.05892094411702151,
+  0.048540195172121076,
+  0.03812682806131509,
+  0.02830242809740451,
+  0.01983655704542007,
+  0.012133516280499421,
+  0.009143190985861756,
+  0.0017433948030936106
 };
 
 static void LPFilter_init(LPFilter* f) {
@@ -217,11 +219,11 @@ static void LPFilter_init(LPFilter* f) {
   }
   f->last_index = 0;
   
-   // Normalize coefficients so DC gain is exactly 1
+   // Normalize coefficients so DC gain is 1: upsampling decreases amplitude by the upsampligng factor.
   if (!normalized) {
-     for (i = 0; i < LPFILTER_TAP_NUM; ++i) filter_taps[i] /= DC_gain;
+     for (i = 0; i < LPFILTER_TAP_NUM; ++i) filter_taps[i] *= upsampling_factor/DC_gain;
      normalized = true;
-  }
+  }    
 }
 
 static void LPFilter_put(LPFilter* f, double input) {
@@ -235,7 +237,7 @@ static double LPFilter_get(LPFilter* f) {
   
   for (i = 0; i < LPFILTER_TAP_NUM; ++i) {
     index = index != 0 ? index-1 : LPFILTER_TAP_NUM-1;
-    acc += f->history[index] * filter_taps[i];
+    if (f->history[index] != 0.0) acc += f->history[index] * filter_taps[i];
   }
   return acc;
 }
@@ -268,9 +270,9 @@ Angles according extrinsic rotation sequence x-y-z (https://en.wikipedia.org/wik
 which is equivalent to the intrinsic rotation z-y'-x'' (so the angles are the same): yaw -> pitch -> roll.
 See also https://en.wikipedia.org/wiki/Davenport_chained_rotations
 */
-void printOrientation(double ax, double ay, double az, double mx, double my, double mz)
+void updateOrientation(double ax, double ay, double az, double mx, double my, double mz)
 {
-double yaw, pitch, roll, tilt;
+//double yaw, pitch, roll, tilt;
 double sinpitch, cospitch, sinroll, cosroll, rootayaz, rootaxayaz, alpha=0.05;
   
    rootayaz = sqrt(ay*ay+az*az);
@@ -303,7 +305,7 @@ double sinpitch, cospitch, sinroll, cosroll, rootayaz, rootaxayaz, alpha=0.05;
    pitch *= 180/M_PI; 
    roll *= 180/M_PI; 
      
-   printf("M/A-based Yaw, Pitch, Roll: %3.0f %3.0f %3.0f   Tilt: %3.0f\n", yaw, pitch, roll, tilt);
+   //printf("M/A-based Yaw, Pitch, Roll: %3.0f %3.0f %3.0f   Tilt: %3.0f\n", yaw, pitch, roll, tilt);
 }
 
 
@@ -705,6 +707,7 @@ int n, rc, samples, timediff;
 char *p, str[17], buf[12*32+1], commands[] = {0x07, 0x01, 0x18, 0x01, 0x06, 0x00, 0x00, 0x00};
 uint32_t start_tick, end_tick, mtick;
 static uint32_t old_mtick;
+static unsigned int samples_count, count;
 
 /* These values are the RAW signed 16-bit readings from the sensors */
 int16_t gx, gy, gz; // x, y, and z axis raw readings of the gyroscope
@@ -738,19 +741,15 @@ double mxrf, myrf, mzrf; // values after LPF
    mx -= err_MA[0]; my -= err_MA[1]; mz -= err_MA[2];      
    /* Compensate for softiron and scale result */
    mxr = mx*scale_MA[0]*mRes; myr = my*scale_MA[1]*mRes; mzr = mz*scale_MA[2]*mRes; 
-      
-   // Magnetometer data is rather noisy. So apply a low pass filter.
-   LPFilter_put(&filter_x, mxr); LPFilter_put(&filter_y, myr); LPFilter_put(&filter_z, mzr);
-   mxrf = LPFilter_get(&filter_x); myrf = LPFilter_get(&filter_y); mzrf = LPFilter_get(&filter_z);
-      
+           
    /*
    mtick = gpioTick();
    if (old_mtick) printf("Time between MAG samples: %.1f ms\n", (mtick-old_mtick)/1000.0);
    old_mtick = mtick;
    */
       
-   snprintf(str, sizeof(str), "M:%-6.1f mG", 1000*sqrt(mxrf*mxrf+myrf*myrf+mzrf*mzrf));  
-   oledWriteString(0, 6, str, false);  
+   //snprintf(str, sizeof(str), "M:%-6.1f mG", 1000*sqrt(mxr*mxr+myr*myr+mzr*mzr));  
+   //oledWriteString(0, 6, str, false);  
    
    /*
    snprintf(str, sizeof(str), "MX:%-6.1f mG", mxr*1000);  
@@ -760,10 +759,7 @@ double mxrf, myrf, mzrf; // values after LPF
    snprintf(str, sizeof(str), "MZ:%-6.1f mG", mzr*1000);  
    oledWriteString(0, 6, str, false); 
    */
-         
-   //printHeading(mxr, myr);
-      
-   
+       
    /* 
    Now, read accel/gyro data. Read data from FIFO, as ODR of accel/gyro is probably higher
    than that of magnetometer. The accel/gyro stores samples in the FIFO until it is read.
@@ -771,22 +767,26 @@ double mxrf, myrf, mzrf; // values after LPF
 
    rc = i2cReadByteData(i2c_accel_handle, 0x2F);  // Read FIFO_SRC register, needs 0.1 ms
    if (rc < 0) goto rw_error;
-   if (rc&0x40) fprintf(stderr, "%s: FIFO overrun!\n", __func__);
+   if (rc&0x40) fprintf(stderr, "%s: FIFO overrun!\n", __func__);  // Should not happen
    // samples in FIFO are between 3 and 4, average 3: AG ODR = 119 Hz, M ODR = 40 Hz, 119/40=3
-   // if AG ODR = 238, samples is between 8 and 10
+   // if AG ODR = 238, samples is between 6 and 8
    samples = rc&0x3F;   // samples in FIFO could be zero  
    //printf("Samples: %d\n", samples);
+   if (samples < upsampling_factor) {  // Should not happen. Emit a warning message.
+      fprintf(stderr, "%s: Timing problem: number of samples of accelerometer (%d) is less than upsampling factor (%d)", 
+            __func__, samples, upsampling_factor);    
+   }   
       
    if (samples) {  // if FIFO has sth, read it
       /* Burst read. Accelerometer and gyroscope sensors are activated at the same ODR.
          So read all FIFO lines (12 bytes each) in a single I2C transaction 
-         using a special function in pigpio library. */
+         using a special function in pigpio library */
       commands[5] = (12*samples)&0xFF;  // LSb value of number of bytes to read
       commands[6] = (12*samples)>>8;    // MSb value of number of bytes to read
       rc = i2cZip(i2c_accel_handle, commands, sizeof(commands), buf, sizeof(buf));   // Needs 1.2 ms for 4 samples
       if (rc < 0) goto rw_error;         
    }
-      
+
    for (n=0; n<samples; n++) { 
       p = buf + 12*n;
       
@@ -804,7 +804,21 @@ double mxrf, myrf, mzrf; // values after LPF
       gxr = gx*gRes; gyr = gy*gRes; gzr = gz*gRes;              
          
       if (accel_fp) fprintf(accel_fp, "%3.5f;%3.5f;%3.5f\n", axr, ayr, azr);
-         
+ 
+      /* 
+      Perform upsampling of magnetometer data to the ODR of the accelerometer/gyro by a factor of N. 
+      First, introduce N-1 0-valued samples to align both ODR. Then, filter with a low pass filter to
+      eliminate the spectral replica of the original signal.
+      */
+      if (samples_count++%upsampling_factor == 0) {  // After the 0-valued samples, feed the real magnetometer value 
+         LPFilter_put(&filter_x, mxr); LPFilter_put(&filter_y, myr); LPFilter_put(&filter_z, mzr);  
+      }
+      else {  // Introduce 0-valued samples to align both ODR
+         LPFilter_put(&filter_x, 0); LPFilter_put(&filter_y, 0); LPFilter_put(&filter_z, 0);         
+      }
+      // Take output of the filter
+      mxrf = LPFilter_get(&filter_x); myrf = LPFilter_get(&filter_y); mzrf = LPFilter_get(&filter_z);
+   
       /*
       snprintf(str, sizeof(str), "AX:% 7.1f mg", axr*1000);  
       if (n==0) oledWriteString(0, 4, str, false); 
@@ -823,19 +837,26 @@ double mxrf, myrf, mzrf; // values after LPF
       */
          
       // 3D compass; valid if car does not accelerate (ie, only acceleration is gravity)
-      //printOrientation(axr, ayr, azr, mxrf, myrf, mzrf);
-         
-      // Update sensor fusion filter with the data gathered. Do not filter magnetometer data.
-      //MadgwickQuaternionUpdate(axr, ayr, azr, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxr, myr, mzr);
+      updateOrientation(axr, ayr, azr, mxrf, myrf, mzrf);   
+      
+      // Update sensor fusion filter with the data gathered
+      //MadgwickQuaternionUpdate(axr, ayr, azr, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxrf, myrf, mzrf);
       //getAttitude(&yaw, &pitch, &roll);
          
       // Kalman extended filter
       //calculateEKFAttitude(gxr, gyr, gzr, axr, ayr, azr, deltat);
    }     
    
+   snprintf(str, sizeof(str), "Yaw: %-4.0f", yaw);  
+   if (count%3==0) oledWriteString(0, 4, str, false);
+   snprintf(str, sizeof(str), "Pitch: %-4.0f", pitch);  
+   if (count%3==1) oledWriteString(0, 5, str, false);        
+   snprintf(str, sizeof(str), "Roll: %-4.0f", roll);  
+   if (count%3==2) oledWriteString(0, 6, str, false); 
+   count++;   
    
-   end_tick = gpioTick();
-   timediff = end_tick - start_tick;
+   //end_tick = gpioTick();
+   //timediff = end_tick - start_tick;
    //printf("Elapsed time in %s: %.1f ms\n", __func__, timediff/1000.0);
    return;
    
@@ -855,6 +876,13 @@ int rc;
 int dl, dh;
 int16_t temp;
 uint8_t byte;
+
+   /***** Initial checks *****/
+   if (odr_ag_modes[ODR_AG] < odr_m_modes[ODR_M]) {
+      fprintf(stderr, "%s: Invalid ODR values for IMU\n", __func__);
+      return -1;
+   }
+   upsampling_factor = lround(odr_ag_modes[ODR_AG] / odr_m_modes[ODR_M]);
 
    /************************* Open connection and check state ***********************/
    i2c_accel_handle = i2cOpen(I2C_BUS, accel_addr, 0);
@@ -1046,35 +1074,6 @@ void closeLSM9DS1(void)
 
 
 
-// Define output variables from updated quaternion---these are Tait-Bryan angles, commonly used in aircraft orientation.
-// In this coordinate system, the positive z-axis is down toward Earth. 
-// Yaw is the angle between Sensor x-axis and Earth magnetic North (or true North if corrected for local declination, 
-// looking down on the sensor positive yaw is counterclockwise.
-// Pitch is angle between sensor x-axis and Earth ground plane, toward the Earth is positive, up toward the sky is negative.
-// Roll is angle between sensor y-axis and Earth ground plane, y-axis up is positive roll.
-// These arise from the definition of the homogeneous rotation matrix constructed from quaternions.
-// Tait-Bryan angles as well as Euler angles are non-commutative; that is, to get the correct orientation the rotations must be
-// applied in the correct order which for this configuration is yaw, pitch, and then roll.
-// For more see http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles which has additional links.
-// See https://en.wikipedia.org/wiki/Euler_angles for more information.
-// Yaw, pitch and roll are the Tait-Bryan angles in a z-y’-x'' intrinsic rotation
-int getAttitude(double *yaw, double *pitch, double *roll)
-{
-   
-   *yaw   = atan2(2 * (q[1]*q[2] + q[0]*q[3]), 1 - 2*(q[2]*q[2] + q[3]*q[3]));   // Positive angle westwards
-   *pitch = asin(2 * (q[0]*q[2] - q[1]*q[3]));
-   *roll  = atan2(2 * (q[0]*q[1] + q[2]*q[3]), 1 - 2*(q[1]*q[1] + q[2]*q[2]));
-   *yaw   *= 180/M_PI;  // heading
-   *pitch *= 180/M_PI;  // elevation
-   *roll  *= 180/M_PI;  // bank
-   *yaw -= declination;
-   
-   printf("Magd Yaw, Pitch, Roll: %3.0f %3.0f %3.0f\n", *yaw, *pitch, *roll);
-   if (i2c_accel_handle>=0 && i2c_mag_handle>=0) return 0;
-   else return -1;
-}
-
-
 void save_accel_data(void)
 {
 static char *template="accel_XXXXXX.csv";
@@ -1102,6 +1101,34 @@ int fd;
 }
 
 
+
+// Define output variables from updated quaternion---these are Tait-Bryan angles, commonly used in aircraft orientation.
+// In this coordinate system, the positive z-axis is down toward Earth. 
+// Yaw is the angle between Sensor x-axis and Earth magnetic North (or true North if corrected for local declination, 
+// looking down on the sensor positive yaw is counterclockwise.
+// Pitch is angle between sensor x-axis and Earth ground plane, toward the Earth is positive, up toward the sky is negative.
+// Roll is angle between sensor y-axis and Earth ground plane, y-axis up is positive roll.
+// These arise from the definition of the homogeneous rotation matrix constructed from quaternions.
+// Tait-Bryan angles as well as Euler angles are non-commutative; that is, to get the correct orientation the rotations must be
+// applied in the correct order which for this configuration is yaw, pitch, and then roll.
+// For more see http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles which has additional links.
+// See https://en.wikipedia.org/wiki/Euler_angles for more information.
+// Yaw, pitch and roll are the Tait-Bryan angles in a z-y’-x'' intrinsic rotation
+int getAttitude(double *yaw, double *pitch, double *roll)
+{
+   
+   *yaw   = atan2(2 * (q[1]*q[2] + q[0]*q[3]), 1 - 2*(q[2]*q[2] + q[3]*q[3]));   // Positive angle westwards
+   *pitch = asin(2 * (q[0]*q[2] - q[1]*q[3]));
+   *roll  = atan2(2 * (q[0]*q[1] + q[2]*q[3]), 1 - 2*(q[1]*q[1] + q[2]*q[2]));
+   *yaw   *= 180/M_PI;  // heading
+   *pitch *= 180/M_PI;  // elevation
+   *roll  *= 180/M_PI;  // bank
+   *yaw -= declination;
+   
+   //printf("Magd Yaw, Pitch, Roll: %3.0f %3.0f %3.0f\n", *yaw, *pitch, *roll);
+   if (i2c_accel_handle>=0 && i2c_mag_handle>=0) return 0;
+   else return -1;
+}
 
 
 
@@ -1158,7 +1185,7 @@ double q4q4 = q4 * q4;
    _4bx = 2.0 * _2bx;
    _4bz = 2.0 * _2bz;
 
-   // Gradient decent algorithm corrective step
+   // Gradient descent algorithm corrective step
    s1 = -_2q3 * (2.0 * q2q4 - _2q1q3 - ax) + _2q2 * (2.0 * q1q2 + _2q3q4 - ay) - _2bz * q3 * (_2bx * (0.5 - q3q3 - q4q4) + _2bz * (q2q4 - q1q3) - mx) + (-_2bx * q4 + _2bz * q2) * (_2bx * (q2q3 - q1q4) + _2bz * (q1q2 + q3q4) - my) + _2bx * q3 * (_2bx * (q1q3 + q2q4) + _2bz * (0.5 - q2q2 - q3q3) - mz);
    s2 = _2q4 * (2.0 * q2q4 - _2q1q3 - ax) + _2q1 * (2.0 * q1q2 + _2q3q4 - ay) - 4.0 * q2 * (1.0 - 2.0 * q2q2 - 2.0 * q3q3 - az) + _2bz * q4 * (_2bx * (0.5 - q3q3 - q4q4) + _2bz * (q2q4 - q1q3) - mx) + (_2bx * q3 + _2bz * q1) * (_2bx * (q2q3 - q1q4) + _2bz * (q1q2 + q3q4) - my) + (_2bx * q4 - _4bz * q2) * (_2bx * (q1q3 + q2q4) + _2bz * (0.5 - q2q2 - q3q3) - mz);
    s3 = -_2q1 * (2.0 * q2q4 - _2q1q3 - ax) + _2q4 * (2.0 * q1q2 + _2q3q4 - ay) - 4.0 * q3 * (1.0 - 2.0 * q2q2 - 2.0 * q3q3 - az) + (-_4bx * q3 - _2bz * q1) * (_2bx * (0.5 - q3q3 - q4q4) + _2bz * (q2q4 - q1q3) - mx) + (_2bx * q2 + _2bz * q4) * (_2bx * (q2q3 - q1q4) + _2bz * (q1q2 + q3q4) - my) + (_2bx * q1 - _4bz * q3) * (_2bx * (q1q3 + q2q4) + _2bz * (0.5 - q2q2 - q3q3) - mz);

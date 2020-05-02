@@ -40,9 +40,9 @@ static double voltage, current;
 static const unsigned millis = 200;  // Time between calls to checkPower in milliseconds
 static unsigned timerNumber;         // The timer used to periodically read the ADC
 
-// 3.3 is the voltage reference, 255 are the steps (8 bits ADC resolution)
+// 3.3 is the voltage reference (+-1%), 255 are the steps (8 bits ADC resolution)
 // 22000 and 12100 are the precision (1%) resistors in series connected to ADC#0 for battery voltage
-// Precision: about 13 mV (3.3/255) quantisation error due to ADC, times 2.82 (resistors), 
+// Accuracy: about 13 mV (3.3/255) quantisation error due to ADC, times 2.82 (resistors), 
 // which is a total error of about +-18 mV (+-13/2*2.82)
 static const double factor_v = 3.3/255*(22000+12100)/12100; 
 static const double factor_v2 = 3.3/255*2; // ADC#3 is connected to the middle point of the battery pack, via 2 22k resistors
@@ -50,8 +50,8 @@ static const double factor_v2 = 3.3/255*2; // ADC#3 is connected to the middle p
 // 1100 and 100 are the precision (1%) resistors in the current sensing circuit connected to ADC#1
 // 0.1 is the sensing resistor (1%)
 // current = voltage measured / 1.1
-// Precision: 6 mA due to offset voltage in opamp (600 uV in NPN stage, thus 0.6 mV/0.1) 
-// plus 12 mA due to ADC error (13 mV/1.1), which is a total error of about +-12 mA
+// Accuracy: 6 mA due to offset voltage in opamp (600 uV in NPN stage, thus 0.6 mV/0.1) 
+// plus 12 mA due to ADC error (13 mV/1.1), which is a total error of about +-9 mA
 static const double factor_i = 3.3/255/(0.1*1100/100);  
 
 

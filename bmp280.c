@@ -46,13 +46,13 @@ Oversampling Setting
 0: Skip, 1: ultra low power, 2: low power, 3: standard, 4: high resolution, 5: ultra high resolution
 *************/
 
-static const enum {SLEEP,FORCED,FORCED2,NORMAL} mode = NORMAL;
-static const enum {SKIP,ULP,LP,STD,HR,UHR} osrs_t = LP, osrs_p = UHR;
+static const enum {SLEEP,FORCED,FORCED2,NORMAL} mode = FORCED;
+static const enum {SKIP,ULP,LP,STD,HR,UHR} osrs_t = ULP, osrs_p = ULP;
 static const enum {F_OFF,F_2,F_4,F_8,F_16} filter = F_OFF;
 
 /* Define list of standby times for normal mode, rounded up, in milliseconds */
 static const int t_standby[] = {1, 63, 125, 250, 500, 1000, 2000, 4000};  // 1 ms will not work
-static const int t_sb = 3;  // The value with this index in t_standby is used
+static const int t_sb = 6;  // The value with this index in t_standby is used
 
 
 /* Compensation parameters read from the chip */
@@ -219,6 +219,11 @@ static char str_old[17];
    raw_p = ((uint32_t)buf[0]<<12) | ((uint32_t)buf[1]<<4) | ((uint32_t)buf[2]>>4);
    raw_t = ((uint32_t)buf[3]<<12) | ((uint32_t)buf[4]<<4) | ((uint32_t)buf[5]>>4);
 
+   if (mode==FORCED || mode==FORCED2) {  // If forced mode, trigger next reading
+      rc = i2cWriteByteData(i2c_handle, 0xF4, osrs_t<<5 | osrs_p<<2 | mode);
+      if (rc < 0) ERR(, "Cannot read data from BMP280"); 
+   }
+   
    // Calculate compensated values. Temperature must be calculated before pressure
    temperature = bmp280_compensate_T_int32((int32_t)raw_t)/100.0;  // In degrees centigrade  
    p = bmp280_compensate_P_int64((int32_t)raw_p)/25600.0;   // In hPa or mbar
