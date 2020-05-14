@@ -284,6 +284,7 @@ int setupMotor(Motor_t *motor)
 
 void closeMotor(Motor_t *motor)
 {
+   printf("Closing motor...\n");
    if (useEncoder) {
       gpioSetAlertFunc(motor->sensor_pin, NULL); 
       gpioSetTimerFunc(TIMER2, 100, NULL);
@@ -413,6 +414,7 @@ int setupSonarHCSR04(void)
 
 void closeSonarHCSR04(void)
 {
+   printf("Closing sonar...\n");
    gpioSetTimerFunc(TIMER0, SONARDELAY, NULL);
    gpioSetAlertFunc(sonarHCSR04.echo_pin, NULL);
    gpioSetMode(sonarHCSR04.trigger_pin, PI_INPUT);
@@ -586,17 +588,25 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
 }
 
 
+
+void closeWiimote(void)
+{
+    printf("Closing wiimote...\n");
+    if (mando.wiimote) cwiid_close((cwiid_wiimote_t*)mando.wiimote);
+    atomic_store_explicit(&mando.wiimote, NULL, memory_order_release);
+    atomic_store_explicit(&mando.buttons, 0, memory_order_release);       
+}
+      
+     
+
 void setupWiimote(void)
 {
-    static uint8_t bluetooth_glyph[] = {0, 66, 36, 255, 153, 90, 36, 0};
-    cwiid_wiimote_t *wiimote;
-    bdaddr_t ba;
+static uint8_t bluetooth_glyph[] = {0, 66, 36, 255, 153, 90, 36, 0};
+cwiid_wiimote_t *wiimote;
+bdaddr_t ba;
     
-    if (mando.wiimote) cwiid_close((cwiid_wiimote_t*)mando.wiimote);
+    closeWiimote();
     cwiid_set_err(wiiErr);
-    atomic_store_explicit(&mando.wiimote, NULL, memory_order_release);
-    atomic_store_explicit(&mando.buttons, 0, memory_order_release);    
-
     oledSetBitmap8x8(15*8, 0, NULL);  // 15: last position in line (0-15), clear BT icon
     oledBigMessage(0, "Scan... ");
     pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
@@ -624,7 +634,8 @@ void setupWiimote(void)
     return;
 }
 
-
+ 
+   
 static void* scanWiimotes(void *arg)
 {
     atomic_store_explicit(&scanningWiimote, true, memory_order_release); // signal that scanning is in place
@@ -901,7 +912,7 @@ void closeKarr(void)
 void closedown(void)
 {
    closeSonarHCSR04();
-   if (mando.wiimote) cwiid_close((cwiid_wiimote_t*)mando.wiimote);
+   closeWiimote();
    closeMotor(&m_izdo);
    closeMotor(&m_dcho);
    closeSound();
@@ -923,6 +934,7 @@ void terminate(int signum)
    if (checkBattery) closePCF8591();  // Do not call this in closedown()
    oledShutdown();
    gpioTerminate();
+   printf("Bye\n");
    exit(1);
 }
 
@@ -977,7 +989,7 @@ int r = 0;
    setupKarr();  // start KARR scanner effect
    oledSetInversion(false); // clear display
    
-   r |= setupSonarHCSR04();  // last, as it starts measuring distance and triggering semaphore
+   r |= setupSonarHCSR04();  // last to call, as it starts measuring distance and triggering semaphore
 
    return r;
 }

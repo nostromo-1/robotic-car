@@ -149,9 +149,12 @@ rw_error:
 
 void closeBMP280(void)
 {
+   printf("Closing weather sensor...\n");
    gpioSetTimerFunc(timerNumber, 500, NULL);  // Stop reading thread
-   i2cWriteByteData(i2c_handle, 0xF4, 0);  // Set sensor to sleep mode
-   if (i2c_handle>=0) i2cClose(i2c_handle);   
+   if (i2c_handle>=0) {
+      i2cWriteByteData(i2c_handle, 0xF4, 0);  // Set sensor to sleep mode
+      i2cClose(i2c_handle); 
+   }      
    i2c_handle = -1;    
 }
 

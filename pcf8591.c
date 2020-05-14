@@ -29,7 +29,7 @@ are both the 3.3V output of the Raspberry Pi (it is very stable).
   
 /* i2c bus where PCF8591 is connected. 3 is a bit-bang gpio-driver.
 It must be activated by adding this line to config.txt: 
-dtoverlay=i2c-gpio,i2c_gpio_sda=14,i2c_gpio_scl=15,i2c_gpio_delay_us=3
+dtoverlay=i2c-gpio,i2c_gpio_sda=9,i2c_gpio_scl=11,i2c_gpio_delay_us=3
 */
 #define I2C_BUS 3   
 
@@ -44,14 +44,18 @@ static unsigned timerNumber;         // The timer used to periodically read the 
 // 22000 and 12100 are the precision (1%) resistors in series connected to ADC#0 for battery voltage
 // Accuracy: about 13 mV (3.3/255) quantisation error due to ADC, times 2.82 (resistors), 
 // which is a total error of about +-18 mV (+-13/2*2.82)
+// Max. allowed voltage value: 9.3 V
 static const double factor_v = 3.3/255*(22000+12100)/12100; 
-static const double factor_v2 = 3.3/255*2; // ADC#3 is connected to the middle point of the battery pack, via 2 22k resistors
+
+// ADC#3 is connected to the middle point of the battery pack, via 2 22k precision (1%) resistors
+static const double factor_v2 = 3.3/255*2; 
 
 // 1100 and 100 are the precision (1%) resistors in the current sensing circuit connected to ADC#1
 // 0.1 is the sensing resistor (1%)
 // current = voltage measured / 1.1
 // Accuracy: 6 mA due to offset voltage in opamp (600 uV in NPN stage, thus 0.6 mV/0.1) 
 // plus 12 mA due to ADC error (13 mV/1.1), which is a total error of about +-9 mA
+// Max. allowed current value: 3 A
 static const double factor_i = 3.3/255/(0.1*1100/100);  
 
 
@@ -90,8 +94,9 @@ rw_error:
 
 void closePCF8591(void)
 {
+   printf("Closing power meter...\n");
    gpioSetTimerFunc(timerNumber, millis, NULL);
-   i2cClose(i2c_handle);
+   if (i2c_handle>=0) i2cClose(i2c_handle);
    i2c_handle = -1;
 }
 
@@ -139,9 +144,12 @@ static unsigned underVoltageTime = 0;
    if (rc < 0) goto rw_error;
    */
 
-   voltage = factor_v*adc[2];
-   current = factor_i*adc[3]; 
-   bat1 = factor_v2*adc[1];
+   voltage = factor_v*adc[2];  // Battery voltage level
+   current = factor_i*adc[3];  // Current draw
+   if (adc[1]>10)   // if voltage is too low, it means cable is not connected
+      bat1 = factor_v2*adc[1];  // Voltage level at the middle of the battey pack (1 18650 if 2 in series are used)
+   else
+      bat1 = voltage/2;  // if mid-point cable is not connected, assume this is half the battery voltage
    bat2 = voltage - bat1;
    
    if (voltage < 6.2) step = 0;        // Battery at 0%
@@ -176,14 +184,14 @@ static unsigned underVoltageTime = 0;
    }
 
    // Shutdown if voltage is too low for a long period
-   if (bat1<2.8 || bat2<2.8) underVoltageTime += millis;
+   if (bat1<2.9 || bat2<2.9) underVoltageTime += millis;
    else underVoltageTime = 0;
    if (underVoltageTime >= maxUndervoltageTime) {  
       oledBigMessage(0, "Battery!");   
       oledBigMessage(1, "SHUTDOWN");
-      //closedown();
-      //execlp("sudo", "sudo", "poweroff", NULL);   // should never return
-      //exit(1);
+      closedown();
+      execlp("sudo", "sudo", "poweroff", NULL);   // should never return
+      exit(1);
    }
    
    return;

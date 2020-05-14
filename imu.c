@@ -68,7 +68,7 @@ The IMU is read with the magnetometer ODR; the accelerometer and gyroscope data 
 by the IMU in a FIFO (32 samples max), allowing a higher ODR in accel/gyro than in magnetometer.
 In order for the algorithms to work, AG_ODR must be higher or equal than M_ODR. If it is much higher, the FIFO will overrun.
 So eg AG_ODR_952 is only possible if ODR_M = M_ODR_80, otherwise the FIFO overruns.
-In order for the upsampling of magnetometer data to work, ODR_AG must be an integer multiple of ODR_M (or very near).
+In order for the upsampling of magnetometer data to work, ODR_AG must be an integer multiple of ODR_M (or very close).
 */
 static const enum {AG_ODR_OFF,AG_ODR_14_9,AG_ODR_59_5,AG_ODR_119,AG_ODR_238,AG_ODR_476,AG_ODR_952} ODR_AG = AG_ODR_238; 
 static const double odr_ag_modes[] = {0,14.9,59.5,119,238,476,952};
@@ -90,9 +90,12 @@ static int16_t err_GY[3];  // ex,ey,ez values (error for each axis in gyroscope)
 static int16_t err_MA[3];  // ex,ey,ez values (error for each axis in magnetometer, hardiron effects)
 static double scale_MA[3] = {1.0, 1.0, 1.0}; // ex,ey,ez values (error for each axis in magnetometer, softiron effects)
 
-static double deviation_m[3];  // Measured standard deviation of x, y and z values of magnetometer
+static double deviation_AL[3];  // Measured standard deviation of x, y and z values of accelerometer
+static double deviation_GY[3];  // Measured standard deviation of x, y and z values of gyroscope
+static double deviation_MA[3];  // Measured standard deviation of x, y and z values of magnetometer
 
 static const char *cal_file = "calibration.dat"; // File where calibration data is stored
+static const char *dev_file = "deviation.dat";   // File where standard deviation data is stored
 static const double declination = +1.266;  // Local magnetic declination as given by http://www.magnetic-declination.com/
 static const double magneticField = 0.457;   // Magnitude of the local magnetic field in Gauss
 
@@ -322,24 +325,42 @@ int rc;
    if (!fp) ERR(, "Cannot open calibration file %s: %s", cal_file, strerror(errno));
    
    rc = fscanf(fp, "AL: %d, %d, %d\n", &err_AL[0], &err_AL[1], &err_AL[2]);
-   if (rc==EOF || rc!=3) goto rw_error;
+   if (rc==EOF || rc!=3) goto cal_error;
    rc = fscanf(fp, "GY: %d, %d, %d\n", &err_GY[0], &err_GY[1], &err_GY[2]);   
-   if (rc==EOF || rc!=3) goto rw_error;
+   if (rc==EOF || rc!=3) goto cal_error;
    rc = fscanf(fp, "MGH: %d, %d, %d\n", &err_MA[0], &err_MA[1], &err_MA[2]);
-   if (rc==EOF || rc!=3) goto rw_error;   
+   if (rc==EOF || rc!=3) goto cal_error;   
    rc = fscanf(fp, "MGS: %lf, %lf, %lf\n", &scale_MA[0], &scale_MA[1], &scale_MA[2]);   
-   if (rc==EOF || rc!=3) goto rw_error;
-   
+   if (rc==EOF || rc!=3) goto cal_error;  
    fclose(fp);
+   
+   fp = fopen(dev_file, "r");
+   if (!fp) ERR(, "Cannot open deviation file %s: %s", dev_file, strerror(errno));
+   
+   rc = fscanf(fp, "AL: %lf, %lf, %lf\n", &deviation_AL[0], &deviation_AL[1], &deviation_AL[2]);
+   if (rc==EOF || rc!=3) goto dev_error;
+   rc = fscanf(fp, "GY: %lf, %lf, %lf\n", &deviation_GY[0], &deviation_GY[1], &deviation_GY[2]);
+   if (rc==EOF || rc!=3) goto dev_error;  
+   rc = fscanf(fp, "MG: %lf, %lf, %lf\n", &deviation_MA[0], &deviation_MA[1], &deviation_MA[2]);
+   if (rc==EOF || rc!=3) goto dev_error;   
+   fclose(fp);   
+   
    return;
    
-rw_error:
+cal_error:
    fclose(fp);
    err_AL[0] = err_AL[1] = err_AL[2] = 0;
    err_GY[0] = err_GY[1] = err_GY[2] = 0; 
    err_MA[0] = err_MA[1] = err_MA[2] = 0; 
    scale_MA[0] = scale_MA[1] = scale_MA[2] = 1.0;       
    ERR(, "Cannot read data from calibration file %s", cal_file);
+   
+dev_error:
+   fclose(fp);
+   deviation_AL[0] = deviation_AL[1] = deviation_AL[2] = 0.0;
+   deviation_GY[0] = deviation_GY[1] = deviation_GY[2] = 0.0; 
+   deviation_MA[0] = deviation_MA[1] = deviation_MA[2] = 0.0;      
+   ERR(, "Cannot read data from deviation file %s", dev_file);  
 }
  
 
@@ -356,6 +377,14 @@ FILE *fp;
    fprintf(fp, "MGH: %d, %d, %d\n", err_MA[0], err_MA[1], err_MA[2]);    
    fprintf(fp, "MGS: %f, %f, %f\n", scale_MA[0], scale_MA[1], scale_MA[2]);     
    fclose(fp);
+
+   fp = fopen(dev_file, "w");
+   if (!fp) ERR(, "Cannot open deviation file %s: %s", dev_file, strerror(errno));
+
+   fprintf(fp, "AL: %f, %f, %f\n", deviation_AL[0], deviation_AL[1], deviation_AL[2]);
+   fprintf(fp, "GY: %f, %f, %f\n", deviation_GY[0], deviation_GY[1], deviation_GY[2]);
+   fprintf(fp, "MG: %f, %f, %f\n", deviation_MA[0], deviation_MA[1], deviation_MA[2]);  
+   fclose(fp);    
 }
 
 
@@ -375,54 +404,6 @@ int i, rc;
 rw_error:
    ERR(, "Cannot read/write data from IMU");   
 }
-
- 
- /* 
- Calibrate accelerometer and gyroscope. The IMU should rest horizontal, so that
- measured accel values should be (0,0,1) and measured gyro values should be (0,0,0)
- It writes the measured error in global variables err_AL and err_GY
- */
-static void calibrate_accel_gyro(void)
-{
-int32_t gx=0, gy=0, gz=0; // x, y, and z axis readings of the gyroscope
-int32_t ax=0, ay=0, az=0; // x, y, and z axis readings of the accelerometer   
-char buf[12];
-int rc, samples=0;   
-   
-   printf("Calibrating accelerometer and gyroscope. Leave robot car horizontal...\n");
-   gpioSleep(PI_TIME_RELATIVE, 1, 0); // 1 second delay
-   
-   /* Do 200 readings and average them */
-   do {
-      gpioDelay(lround(1E6/odr_ag_modes[ODR_AG]));   // Wait for new data to arrive, acc. ODR selected (8.4 ms for 119 Hz)
-      rc = i2cReadByteData(i2c_accel_handle, 0x27);  // Read STATUS_REG register
-      if (rc < 0) goto rw_error;  
-      if (rc&0x01) {  // New accelerometer data available
-      
-         // Burst read. Accelerometer and gyroscope sensors are activated at the same ODR
-         // So read 12 bytes: 2x3x2
-         rc = i2cReadI2CBlockData(i2c_accel_handle, 0x18, buf, 12);  
-         if (rc < 0) goto rw_error;
-         samples++;
-         
-         /* Read accel and gyro data. X and Y axis are exchanged, so that reference system is
-            right handed, and filter algorithms work correctly */
-         gy += buf[1]<<8 | buf[0]; gx += buf[3]<<8 | buf[2]; gz += buf[5]<<8 | buf[4];
-         ay += buf[7]<<8 | buf[6]; ax += buf[9]<<8 | buf[8]; az += buf[11]<<8 | buf[10]; 
-      }
-   } while (samples<200); 
-   
-   err_AL[0] = ax/samples; err_AL[1] = ay/samples; err_AL[2] = az/samples-(int32_t)(1/aRes); 
-   err_GY[0] = gx/samples; err_GY[1] = gy/samples; err_GY[2] = gz/samples;   
-   
-   printf("Done\n");
-   return;
-  
-rw_error:
-   err_AL[0] = err_AL[1] = err_AL[2] = 0;
-   err_GY[0] = err_GY[1] = err_GY[2] = 0; 
-   ERR(, "Cannot read/write data from IMU");
-} 
 
 
 
@@ -461,6 +442,122 @@ double mean_x, mean_y, mean_z;
    deviations[1] = sqrt(sum_y/(sample_list->num_elems-1));
    deviations[2] = sqrt(sum_z/(sample_list->num_elems-1));
 }
+
+
+ 
+ /* 
+ Calibrate accelerometer and gyroscope. The IMU should rest horizontal, so that
+ measured accel values should be (0,0,1) and measured gyro values should be (0,0,0)
+ It writes the measured error in global variables err_AL and err_GY
+ */
+static void calibrate_accel_gyro(void)
+{
+int16_t gx, gy, gz; // x, y, and z axis readings of the gyroscope
+int16_t ax, ay, az; // x, y, and z axis readings of the accelerometer   
+char buf[12];
+int i, rc, max_num_samples, elapsed_useconds; 
+int32_t x, y, z;
+uint32_t start_tick;   
+SampleList_t sample_list_a = {.xvalues=NULL, .yvalues=NULL, .zvalues=NULL, .num_elems=0};  
+SampleList_t sample_list_g = {.xvalues=NULL, .yvalues=NULL, .zvalues=NULL, .num_elems=0};  
+const int cal_seconds = 3; // Number of seconds to take samples
+   
+   
+   max_num_samples = cal_seconds * odr_ag_modes[ODR_AG];
+   if (!(sample_list_a.xvalues = calloc(max_num_samples, sizeof(int))) || 
+       !(sample_list_a.yvalues = calloc(max_num_samples, sizeof(int))) || 
+       !(sample_list_a.zvalues = calloc(max_num_samples, sizeof(int)))) {
+      fprintf(stderr, "%s: cannot allocate memory: %s\n", __func__, strerror(errno));
+      goto rw_error; 
+   }
+   if (!(sample_list_g.xvalues = calloc(max_num_samples, sizeof(int))) || 
+       !(sample_list_g.yvalues = calloc(max_num_samples, sizeof(int))) || 
+       !(sample_list_g.zvalues = calloc(max_num_samples, sizeof(int)))) {
+      fprintf(stderr, "%s: cannot allocate memory: %s\n", __func__, strerror(errno));
+      goto rw_error; 
+   }   
+
+   printf("Calibrating accelerometer and gyroscope. Leave robot car horizontal...\n");
+   gpioSleep(PI_TIME_RELATIVE, 1, 0); // 1 second delay
+   
+   start_tick = gpioTick();
+   elapsed_useconds = 0; 
+   do {
+      gpioDelay(lround(1E6/odr_ag_modes[ODR_AG]));   // Wait for new data to arrive, acc. ODR selected (8.4 ms for 119 Hz)
+      rc = i2cReadByteData(i2c_accel_handle, 0x27);  // Read STATUS_REG register
+      if (rc < 0) goto rw_error;  
+      if (rc&0x01) {  // New accelerometer data available
+      
+         // Burst read. Accelerometer and gyroscope sensors are activated at the same ODR
+         // So read 12 bytes: 2x3x2
+         rc = i2cReadI2CBlockData(i2c_accel_handle, 0x18, buf, 12);  
+         if (rc < 0) goto rw_error;
+ 
+         /* Read accel and gyro data. X and Y axis are exchanged, so that reference system is
+            right handed, and filter algorithms work correctly */
+         gy = buf[1]<<8 | buf[0]; gx = buf[3]<<8 | buf[2]; gz = buf[5]<<8 | buf[4];
+         ay = buf[7]<<8 | buf[6]; ax = buf[9]<<8 | buf[8]; az = buf[11]<<8 | buf[10]; 
+         
+         if (sample_list_a.num_elems < max_num_samples) {
+            sample_list_a.xvalues[sample_list_a.num_elems] = ax; 
+            sample_list_a.yvalues[sample_list_a.num_elems] = ay; 
+            sample_list_a.zvalues[sample_list_a.num_elems] = az;
+            sample_list_a.num_elems++;
+            
+            sample_list_g.xvalues[sample_list_g.num_elems] = gx; 
+            sample_list_g.yvalues[sample_list_g.num_elems] = gy; 
+            sample_list_g.zvalues[sample_list_g.num_elems] = gz;
+            sample_list_g.num_elems++;            
+         }
+      }
+      elapsed_useconds = gpioTick() - start_tick;   
+   } while (elapsed_useconds < cal_seconds*1E6);  // loop for 3 seconds
+
+   // Calculate std deviation with the stored samples
+   compute_deviation(deviation_AL, &sample_list_a);  
+   printf("a sigma_x:%.2f, a sigma_y:%.2f, a sigma_z:%.2f\n", deviation_AL[0], deviation_AL[1], deviation_AL[2]);
+   compute_deviation(deviation_GY, &sample_list_g);  
+   printf("g sigma_x:%.2f, g sigma_y:%.2f, g sigma_z:%.2f\n", deviation_GY[0], deviation_GY[1], deviation_GY[2]);   
+         
+   // Calculate the mean of accelerometer biases
+   for (x=y=z=i=0; i<sample_list_a.num_elems; i++) {
+      x += sample_list_a.xvalues[i];
+      y += sample_list_a.yvalues[i];
+      z += sample_list_a.zvalues[i];   
+   }
+   // Store the mean in variable err_AL
+   err_AL[0] = x/sample_list_a.num_elems; err_AL[1] = y/sample_list_a.num_elems; err_AL[2] = z/sample_list_a.num_elems-(int32_t)(1/aRes); 
+   //printf("err_AL: %d %d %d\n", err_AL[0], err_AL[1], err_AL[2]);
+   
+   // Calculate the mean of gyroscope biases
+   for (x=y=z=i=0; i<sample_list_g.num_elems; i++) {
+      x += sample_list_g.xvalues[i];
+      y += sample_list_g.yvalues[i];
+      z += sample_list_g.zvalues[i];   
+   }
+   // Store the mean in variable err_GY   
+   err_GY[0] = x/sample_list_g.num_elems; err_GY[1] = y/sample_list_g.num_elems; err_GY[2] = z/sample_list_g.num_elems; 
+   //printf("err_GY: %d %d %d\n", err_GY[0], err_GY[1], err_GY[2]);   
+
+   free(sample_list_a.xvalues); free(sample_list_a.yvalues); free(sample_list_a.zvalues);  
+   free(sample_list_g.xvalues); free(sample_list_g.yvalues); free(sample_list_g.zvalues);    
+   printf("Done\n");
+   return;
+  
+rw_error:
+   if (sample_list_a.xvalues) free(sample_list_a.xvalues); 
+   if (sample_list_a.yvalues) free(sample_list_a.yvalues); 
+   if (sample_list_a.zvalues) free(sample_list_a.zvalues);
+   if (sample_list_g.xvalues) free(sample_list_g.xvalues); 
+   if (sample_list_g.yvalues) free(sample_list_g.yvalues); 
+   if (sample_list_g.zvalues) free(sample_list_g.zvalues);
+   err_AL[0] = err_AL[1] = err_AL[2] = 0;
+   err_GY[0] = err_GY[1] = err_GY[2] = 0; 
+   ERR(, "Cannot read/write data from IMU");
+} 
+
+
+
 
 
  /* 
@@ -528,8 +625,8 @@ const int error_meas_seconds = 2;  // Number of seconds for error measurement, m
          if (elapsed_useconds > error_meas_seconds*1E6) {  
          // More than 2 seconds elapsed. Now, perform calibration
             if (first_time) {
-               compute_deviation(deviation_m, &sample_list);  // Calculate std deviation with the stored samples
-               printf("sigma_x:%.2f, sigma_y:%.2f, sigma_z:%.2f\n", deviation_m[0], deviation_m[1], deviation_m[2]);
+               compute_deviation(deviation_MA, &sample_list);  // Calculate std deviation with the stored samples
+               printf("m sigma_x:%.2f, m sigma_y:%.2f, m sigma_z:%.2f\n", deviation_MA[0], deviation_MA[1], deviation_MA[2]);
                printf("Rotate robot car slowly in all directions for %d seconds...\n", cal_seconds);
                first_time = false;
                sample_list.num_elems = 0; // Restart writing from the beginning, so only calibration values are stored 
@@ -562,7 +659,7 @@ const int error_meas_seconds = 2;  // Number of seconds for error measurement, m
    
    /* Calculate a better approximation for err_MA and scale_MA, changing the global variables if succesful */
    mean_cuad_error = ellipsoid_fit(&sample_list);
-   if (mean_cuad_error > 0.02) 
+   if (mean_cuad_error > 0.02)   // Limit found experimentally
       fprintf(stderr, "%s: Mean cuadratic error (%.3f) is too big, repeat calibration\n", __func__, mean_cuad_error);
    
    free(sample_list.xvalues); free(sample_list.yvalues); free(sample_list.zvalues);
@@ -647,7 +744,7 @@ const double delta = 0.001;
       Vy -= dVy*100*step/sqrt(dVx*dVx+dVy*dVy+dVz*dVz);
       Vz -= dVz*100*step/sqrt(dVx*dVx+dVy*dVy+dVz*dVz);     
    }
-   printf("%d iterations\n", iter);
+   //printf("%d iterations\n", iter);
     
    /* A minimum was possibly found */
    if (min_err < init_err) {  // if error of new point is less than initial error, eureka
@@ -703,11 +800,12 @@ Better solution (but seems unnecessary) would be to oversample the magnetometer 
 */
 static void imuRead(void)
 {
-int n, rc, samples, timediff;   
+int n, rc, samples;   
 char *p, str[17], buf[12*32+1], commands[] = {0x07, 0x01, 0x18, 0x01, 0x06, 0x00, 0x00, 0x00};
-uint32_t start_tick, end_tick, mtick;
+uint32_t start_tick, mtick;
 static uint32_t old_mtick;
 static unsigned int samples_count, count;
+static double v_m, e_m;
 
 /* These values are the RAW signed 16-bit readings from the sensors */
 int16_t gx, gy, gz; // x, y, and z axis raw readings of the gyroscope
@@ -721,6 +819,7 @@ double mxr, myr, mzr;
 double mxrf, myrf, mzrf; // values after LPF
 
    start_tick = gpioTick(); 
+
    // Read status register in magnetometer, to check if new data is available
    rc = i2cReadByteData(i2c_mag_handle, 0x27);  // Read magnetometer STATUS_REG register, needs 0.1 ms   
    if (rc < 0) goto rw_error;  
@@ -744,7 +843,7 @@ double mxrf, myrf, mzrf; // values after LPF
            
    /*
    mtick = gpioTick();
-   if (old_mtick) printf("Time between MAG samples: %.1f ms\n", (mtick-old_mtick)/1000.0);
+   if (old_mtick) printf("Time between MAG samples: %.1f ms, ODR AG=%.1f\n", (mtick-old_mtick)/1000.0, (mtick-old_mtick)/1000000.0);
    old_mtick = mtick;
    */
       
@@ -767,7 +866,7 @@ double mxrf, myrf, mzrf; // values after LPF
 
    rc = i2cReadByteData(i2c_accel_handle, 0x2F);  // Read FIFO_SRC register, needs 0.1 ms
    if (rc < 0) goto rw_error;
-   if (rc&0x40) fprintf(stderr, "%s: FIFO overrun!\n", __func__);  // Should not happen
+   if (rc&0x40) fprintf(stderr, "%s in %s: FIFO overrun!\n", __func__, __FILE__);  // Should not happen
    // samples in FIFO are between 3 and 4, average 3: AG ODR = 119 Hz, M ODR = 40 Hz, 119/40=3
    // if AG ODR = 238, samples is between 6 and 8
    samples = rc&0x3F;   // samples in FIFO could be zero  
@@ -818,7 +917,12 @@ double mxrf, myrf, mzrf; // values after LPF
       }
       // Take output of the filter
       mxrf = LPFilter_get(&filter_x); myrf = LPFilter_get(&filter_y); mzrf = LPFilter_get(&filter_z);
-   
+      
+      /***************** sensor values are calculated. Now do whatever with them ********/
+      v_m += 9.81*axr * deltat;
+      e_m += v_m*deltat;
+      //printf("a=%f, v=%f, e=%f\n", 9.81*axr, v_m, e_m);
+      
       /*
       snprintf(str, sizeof(str), "AX:% 7.1f mg", axr*1000);  
       if (n==0) oledWriteString(0, 4, str, false); 
@@ -827,7 +931,7 @@ double mxrf, myrf, mzrf; // values after LPF
       snprintf(str, sizeof(str), "AZ:% 7.1f mg", azr*1000); 
       if (n==2) oledWriteString(0, 6, str, false);
       */
-      /* 
+      /*
       snprintf(str, sizeof(str), "GX:% 7.1f dps", gxr);  
       if (n==0) oledWriteString(0, 4, str, false);
       snprintf(str, sizeof(str), "GY:% 7.1f dps", gyr);  
@@ -837,27 +941,26 @@ double mxrf, myrf, mzrf; // values after LPF
       */
          
       // 3D compass; valid if car does not accelerate (ie, only acceleration is gravity)
-      updateOrientation(axr, ayr, azr, mxrf, myrf, mzrf);   
+      //updateOrientation(axr, ayr, azr, mxrf, myrf, mzrf);   
       
       // Update sensor fusion filter with the data gathered
-      //MadgwickQuaternionUpdate(axr, ayr, azr, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxrf, myrf, mzrf);
-      //getAttitude(&yaw, &pitch, &roll);
+      MadgwickQuaternionUpdate(axr, ayr, azr, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxrf, myrf, mzrf);
+      getAttitude(&yaw, &pitch, &roll);
          
       // Kalman extended filter
-      //calculateEKFAttitude(gxr, gyr, gzr, axr, ayr, azr, deltat);
-   }     
+      //EKFUpdateStatus(gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, axr, ayr, azr, deltat);
+      //EKFUpdateStatus(0.01, 0.01, 0.01, 0.01, 0.01, 1.01, deltat);
+   }
    
-   snprintf(str, sizeof(str), "Yaw: %-4.0f", yaw);  
+   snprintf(str, sizeof(str), "Yaw: %-4.1f", yaw);  
    if (count%3==0) oledWriteString(0, 4, str, false);
    snprintf(str, sizeof(str), "Pitch: %-4.0f", pitch);  
    if (count%3==1) oledWriteString(0, 5, str, false);        
    snprintf(str, sizeof(str), "Roll: %-4.0f", roll);  
-   if (count%3==2) oledWriteString(0, 6, str, false); 
-   count++;   
+   if (count%3==2) oledWriteString(0, 6, str, false);  
+   count++;
    
-   //end_tick = gpioTick();
-   //timediff = end_tick - start_tick;
-   //printf("Elapsed time in %s: %.1f ms\n", __func__, timediff/1000.0);
+   //printf("Elapsed time in %s: %.1f ms\n", __func__, (gpioTick()-start_tick)/1000.0);
    return;
    
 rw_error:
@@ -879,7 +982,7 @@ uint8_t byte;
 
    /***** Initial checks *****/
    if (odr_ag_modes[ODR_AG] < odr_m_modes[ODR_M]) {
-      fprintf(stderr, "%s: Invalid ODR values for IMU\n", __func__);
+      fprintf(stderr, "%s: Invalid ODR values for IMU\n", __FILE__);
       return -1;
    }
    upsampling_factor = lround(odr_ag_modes[ODR_AG] / odr_m_modes[ODR_M]);
@@ -1013,7 +1116,7 @@ uint8_t byte;
    }
    else read_calibration_data();   
    
-   /** Continue with accelerometer setting, activate FIFO **/
+   /************** Continue with accelerometer setting, activate FIFO ****************/
    // Set FIFO, FIFO_CTRL
    // FMODE: continuous mode (b110), threshold: 0 (b00000)
    byte = (0x06<<5) + 0x0; 
@@ -1061,13 +1164,17 @@ rw_error:
 
 void closeLSM9DS1(void)
 {
+   printf("Closing IMU...\n");
    gpioSetTimerFunc(timerNumber, 20, NULL);
-   i2cWriteByteData(i2c_mag_handle, 0x22, 0x03);   // Power down magnetometer
-   i2cWriteByteData(i2c_accel_handle, 0x23, 0x00); // Disable FIFO
-   i2cWriteByteData(i2c_accel_handle, 0x10, 0x00); // Power down accel/gyro
-   
-   if (i2c_accel_handle>=0) i2cClose(i2c_accel_handle);
-   if (i2c_mag_handle>=0) i2cClose(i2c_mag_handle);   
+   if (i2c_mag_handle>=0) {
+      i2cWriteByteData(i2c_mag_handle, 0x22, 0x03);   // Power down magnetometer
+      i2cClose(i2c_mag_handle); 
+   }
+   if (i2c_accel_handle>=0) {
+      i2cWriteByteData(i2c_accel_handle, 0x23, 0x00); // Disable FIFO
+      i2cWriteByteData(i2c_accel_handle, 0x10, 0x00); // Power down accel/gyro
+      i2cClose(i2c_accel_handle);
+   }
    i2c_accel_handle = -1;
    i2c_mag_handle = -1;
 }
@@ -1116,10 +1223,10 @@ int fd;
 // Yaw, pitch and roll are the Tait-Bryan angles in a z-y’-x'' intrinsic rotation
 int getAttitude(double *yaw, double *pitch, double *roll)
 {
+   *yaw   = atan2(2.0 * (q[1]*q[2] + q[0]*q[3]), q[0]*q[0] + q[1]*q[1] - q[2]*q[2] - q[3]*q[3]);  
+   *pitch = -asin(2.0 * (q[1]*q[3] - q[0]*q[2]));
+   *roll  = atan2(2.0 * (q[0]*q[1] + q[2]*q[3]), q[0]*q[0] - q[1]*q[1] - q[2]*q[2] + q[3]*q[3]);
    
-   *yaw   = atan2(2 * (q[1]*q[2] + q[0]*q[3]), 1 - 2*(q[2]*q[2] + q[3]*q[3]));   // Positive angle westwards
-   *pitch = asin(2 * (q[0]*q[2] - q[1]*q[3]));
-   *roll  = atan2(2 * (q[0]*q[1] + q[2]*q[3]), 1 - 2*(q[1]*q[1] + q[2]*q[2]));
    *yaw   *= 180/M_PI;  // heading
    *pitch *= 180/M_PI;  // elevation
    *roll  *= 180/M_PI;  // bank
@@ -1133,7 +1240,7 @@ int getAttitude(double *yaw, double *pitch, double *roll)
 
 
 // Implementation of Sebastian Madgwick's "...efficient orientation filter for... inertial/magnetic sensor arrays"
-// (see http://www.x-io.co.uk/category/open-source/ for examples and more details)
+// (see https://x-io.co.uk/open-source-imu-and-ahrs-algorithms for examples and more details)
 // which fuses acceleration, rotation rate, and magnetic moments to produce a quaternion-based estimate of absolute
 // device orientation -- which can be converted to yaw, pitch, and roll. Useful for stabilizing quadcopters, etc.
 // The performance of the orientation filter is at least as good as conventional Kalman-based filtering algorithms
