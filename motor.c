@@ -566,9 +566,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
             
             
             /*** sonido ***/
-            if (~previous_buttons&CWIID_BTN_UP && mando.buttons&CWIID_BTN_UP) {
-                audioplay(alarmFile, 0);
-            }
+            if (~previous_buttons&CWIID_BTN_UP && mando.buttons&CWIID_BTN_UP) audioplay(alarmFile, 0);
         
             /*** End of buttons loop ***/
             previous_buttons = mando.buttons;
@@ -911,6 +909,7 @@ void closeKarr(void)
 /* Terminate program, clean up, restore settings so that car stops */
 void closedown(void)
 {
+   printf("\n");
    closeSonarHCSR04();
    closeWiimote();
    closeMotor(&m_izdo);

@@ -119,6 +119,7 @@ void setupSound(int gpio)
 
 void closeSound(void)
 {
+   printf("Closing sound...\n");
    atomic_store_explicit(&cancel_audio, true, memory_order_release);
    gpioWrite(ampliPIN, PI_OFF);     // shutdown amplifier
 }

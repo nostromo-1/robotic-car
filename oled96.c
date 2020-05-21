@@ -75,6 +75,7 @@ rw_error:
 // Closes the I2C file handle
 void oledShutdown()
 {
+    printf("Closing display...\n");
     if (i2c_handle < 0) return;
     pthread_mutex_lock(&mutex);
     oledWriteCommand(0xAE); // turn off OLED

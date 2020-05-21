@@ -33,7 +33,7 @@ dtoverlay=i2c-gpio,i2c_gpio_sda=9,i2c_gpio_scl=11,i2c_gpio_delay_us=3
 */
 #define I2C_BUS 3   
 
-extern _Atomic bool stalled;    // Car is stalled: it does not change its distance to objects
+
 
 static int i2c_handle = -1;
 static double voltage, current;
@@ -146,9 +146,9 @@ static unsigned underVoltageTime = 0;
 
    voltage = factor_v*adc[2];  // Battery voltage level
    current = factor_i*adc[3];  // Current draw
-   if (adc[1]>10)   // if voltage is too low, it means cable is not connected
+   if (adc[1]>10)   // if there is a non-zero reading, a cable is connected at the mid-battery point
       bat1 = factor_v2*adc[1];  // Voltage level at the middle of the battey pack (1 18650 if 2 in series are used)
-   else
+   else  // if voltage is too low, it means cable is not connected
       bat1 = voltage/2;  // if mid-point cable is not connected, assume this is half the battery voltage
    bat2 = voltage - bat1;
    

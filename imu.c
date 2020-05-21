@@ -55,6 +55,12 @@ typedef struct {
 } SampleList_t;
 
 
+typedef struct {
+  double *history, *taps;
+  unsigned int last_index, taps_num;
+} Filter_t;
+
+
 static int i2c_accel_handle = -1;
 static int i2c_mag_handle = -1;
 static FILE *accel_fp;
@@ -76,8 +82,11 @@ static const double odr_ag_modes[] = {0,14.9,59.5,119,238,476,952};
 static const enum {M_ODR_0_625,M_ODR_1_25,M_ODR_2_5,M_ODR_5,M_ODR_10,M_ODR_20,M_ODR_40,M_ODR_80} ODR_M = M_ODR_40; 
 static const double odr_m_modes[] = {0.625,1.25,2.5,5,10,20,40,80};
 
-/* upsampling_factor is the ratio between both ODRs */
-static int upsampling_factor;
+
+static int upsampling_factor;  /* upsampling_factor is the ratio between both ODRs */
+
+static Filter_t filter_mx, filter_my, filter_mz; /* Interpolating filters for magnetometer */
+static Filter_t filter_ax, filter_ay, filter_az; /* Noise reducction low pass filters for accelerometer */
 
 // gRes, aRes, and mRes store the current resolution for each sensor. 
 // Units of these values would be DPS (or g's or Gs's) per ADC tick.
@@ -136,11 +145,13 @@ static void MadgwickQuaternionUpdate(double ax, double ay, double az, double gx,
                                      double mx, double my, double mz);
                                      
                                      
+                                     
+                                     
 /*****************************************************
 
 Digital FIR filter. A LPF is used for filterig magnetometer data.
 It is used to interpolate after upsampling from ODR_M to ODR_AG.
-It is designed to work with these combinations: (x3, x6)
+It is designed to work with these combinations (upsampling x3 or x6):
 ODR_M=80, ODR_AG=476; ODR_M=80, ODR_AG=238;
 ODR_M=40, ODR_AG=238; ODR_M=40, ODR_AG=119; 
 ODR_M=20, ODR_AG=119; ODR_M=20, ODR_AG=59.5; 
@@ -171,20 +182,7 @@ sampling frequency: 240 Hz
 
 */
 
-#define LPFILTER_TAP_NUM 24
-
-typedef struct {
-  double history[LPFILTER_TAP_NUM];
-  unsigned int last_index;
-} LPFilter;
-
-static LPFilter filter_x, filter_y, filter_z;
-
-static void LPFilter_init(LPFilter* f);
-static void LPFilter_put(LPFilter* f, double input);
-static double LPFilter_get(LPFilter* f);
-
-static double filter_taps[LPFILTER_TAP_NUM] = {
+static double LP_20_240_filter_taps[] = {
   0.0017433948030936106,
   0.009143190985861756,
   0.012133516280499421,
@@ -211,36 +209,127 @@ static double filter_taps[LPFILTER_TAP_NUM] = {
   0.0017433948030936106
 };
 
-static void LPFilter_init(LPFilter* f) {
-  int i;
-  double DC_gain = 0;
-  static bool normalized;
-  
-  for (i = 0; i < LPFILTER_TAP_NUM; ++i) {
-     f->history[i] = 0;
-     DC_gain += filter_taps[i];
-  }
-  f->last_index = 0;
-  
-   // Normalize coefficients so DC gain is 1: upsampling decreases amplitude by the upsampligng factor.
-  if (!normalized) {
-     for (i = 0; i < LPFILTER_TAP_NUM; ++i) filter_taps[i] *= upsampling_factor/DC_gain;
-     normalized = true;
-  }    
+
+/*
+
+FIR filter designed with
+ http://t-filter.appspot.com
+
+sampling frequency: 240 Hz
+
+* 0 Hz - 2 Hz
+  gain = 1
+  desired ripple = 2 dB
+  actual ripple = 0.9673152635399324 dB
+
+* 3 Hz - 9 Hz
+  gain = 1
+  desired ripple = 35 dB
+  actual ripple = 26.642185422323546 dB
+
+* 10 Hz - 120 Hz
+  gain = 0
+  desired attenuation = -40 dB
+  actual attenuation = -41.61351226633883 dB
+
+*/
+
+static double LP_10_240_filter_taps[] = {
+  0.005971139238851345,
+  0.004284876252226764,
+  0.005706608900364033,
+  0.007354427109791928,
+  0.0092055716099583,
+  0.01126528584840552,
+  0.013511905734478582,
+  0.015911620908019886,
+  0.018440918457958876,
+  0.021063915357805933,
+  0.023731627358926564,
+  0.026398828810262873,
+  0.029019156588604933,
+  0.03154122957077722,
+  0.033914554393050085,
+  0.036088808744910154,
+  0.03801579844329516,
+  0.039655081367493177,
+  0.04097170597229545,
+  0.041935178632098835,
+  0.04252308474795214,
+  0.042720929310042295,
+  0.04252308474795214,
+  0.041935178632098835,
+  0.04097170597229545,
+  0.039655081367493177,
+  0.03801579844329516,
+  0.036088808744910154,
+  0.033914554393050085,
+  0.03154122957077722,
+  0.029019156588604933,
+  0.026398828810262873,
+  0.023731627358926564,
+  0.021063915357805933,
+  0.018440918457958876,
+  0.015911620908019886,
+  0.013511905734478582,
+  0.01126528584840552,
+  0.0092055716099583,
+  0.007354427109791928,
+  0.005706608900364033,
+  0.004284876252226764,
+  0.005971139238851345
+};
+
+
+static int LPFilter_init(Filter_t *f, double *tap_array, unsigned tap_list_size) 
+{
+int i;
+
+   if (f == NULL) ERR(-1, "Invalid filter descriptor");
+   if (tap_array == NULL || tap_list_size == 0) ERR(-1, "Invalid tap array for filter");
+   f->last_index = 0;
+   f->taps_num = tap_list_size;
+   f->taps = tap_array;
+   f->history = calloc(tap_list_size, sizeof(double));
+   if (f->history == NULL) ERR(-1, "Cannot allocate memory: %s", strerror(errno));
+   return 0;
 }
 
-static void LPFilter_put(LPFilter* f, double input) {
+
+static double LPFilter_close(Filter_t *f) 
+{
+   if (f->history) free(f->history);
+}
+
+
+static void LPFilter_DCgain(Filter_t *f, double gain_value)
+{
+int i;
+double DC_gain = 0;  
+
+   // Calculate current DC gain
+   for (i = 0; i < f->taps_num; ++i) DC_gain += f->taps[i];
+   // Now, change taps so that the new DC gain is 'gain_value'
+   for (i = 0; i < f->taps_num; ++i) f->taps[i] *= gain_value/DC_gain;     
+}
+
+
+
+static void LPFilter_put(Filter_t *f, double input) 
+{
   f->history[f->last_index++] = input;
-  if (f->last_index == LPFILTER_TAP_NUM) f->last_index = 0;
+  if (f->last_index == f->taps_num) f->last_index = 0;
 }
 
-static double LPFilter_get(LPFilter* f) {
+
+static double LPFilter_get(Filter_t *f) 
+{
   double acc = 0;
   int index = f->last_index, i;
   
-  for (i = 0; i < LPFILTER_TAP_NUM; ++i) {
-    index = index != 0 ? index-1 : LPFILTER_TAP_NUM-1;
-    if (f->history[index] != 0.0) acc += f->history[index] * filter_taps[i];
+  for (i = 0; i < f->taps_num; ++i) {
+    index = index != 0 ? index-1 : f->taps_num-1;
+    acc += f->history[index] * f->taps[i];
   }
   return acc;
 }
@@ -797,6 +886,8 @@ to store data without having to poll so often).
 For each value of the accel/gyro, the fusion filter and the 3D compensated compass are called, using
 the same previously read magnetometer data. It works OK, although the sampling rates are different.
 Better solution (but seems unnecessary) would be to oversample the magnetometer data.
+
+It takes about 5 ms to complete (mostly between 4.5 and 5.5 ms).
 */
 static void imuRead(void)
 {
@@ -816,6 +907,7 @@ int16_t mx, my, mz; // x, y, and z axis raw readings of the magnetometer
 double axr, ayr, azr;
 double gxr, gyr, gzr;
 double mxr, myr, mzr; 
+double axrf, ayrf, azrf; // values after LPF
 double mxrf, myrf, mzrf; // values after LPF
 
    start_tick = gpioTick(); 
@@ -902,21 +994,25 @@ double mxrf, myrf, mzrf; // values after LPF
       axr = ax*aRes; ayr = ay*aRes; azr = az*aRes;      
       gxr = gx*gRes; gyr = gy*gRes; gzr = gz*gRes;              
          
+      /* Pass accelerometer data through a low pass filter to eliminate noise */
+      LPFilter_put(&filter_ax, axr); LPFilter_put(&filter_ay, ayr); LPFilter_put(&filter_az, azr); 
+      axrf = LPFilter_get(&filter_ax); ayrf = LPFilter_get(&filter_ay); azrf = LPFilter_get(&filter_az);      
+       
       if (accel_fp) fprintf(accel_fp, "%3.5f;%3.5f;%3.5f\n", axr, ayr, azr);
  
       /* 
       Perform upsampling of magnetometer data to the ODR of the accelerometer/gyro by a factor of N. 
       First, introduce N-1 0-valued samples to align both ODR. Then, filter with a low pass filter to
-      eliminate the spectral replica of the original signal.
+      eliminate the spectral replica of the original signal. This interpolates the values.
       */
       if (samples_count++%upsampling_factor == 0) {  // After the 0-valued samples, feed the real magnetometer value 
-         LPFilter_put(&filter_x, mxr); LPFilter_put(&filter_y, myr); LPFilter_put(&filter_z, mzr);  
+         LPFilter_put(&filter_mx, mxr); LPFilter_put(&filter_my, myr); LPFilter_put(&filter_mz, mzr);  
       }
       else {  // Introduce 0-valued samples to align both ODR
-         LPFilter_put(&filter_x, 0); LPFilter_put(&filter_y, 0); LPFilter_put(&filter_z, 0);         
+         LPFilter_put(&filter_mx, 0); LPFilter_put(&filter_my, 0); LPFilter_put(&filter_mz, 0);         
       }
       // Take output of the filter
-      mxrf = LPFilter_get(&filter_x); myrf = LPFilter_get(&filter_y); mzrf = LPFilter_get(&filter_z);
+      mxrf = LPFilter_get(&filter_mx); myrf = LPFilter_get(&filter_my); mzrf = LPFilter_get(&filter_mz);
       
       /***************** sensor values are calculated. Now do whatever with them ********/
       v_m += 9.81*axr * deltat;
@@ -944,7 +1040,7 @@ double mxrf, myrf, mzrf; // values after LPF
       //updateOrientation(axr, ayr, azr, mxrf, myrf, mzrf);   
       
       // Update sensor fusion filter with the data gathered
-      MadgwickQuaternionUpdate(axr, ayr, azr, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxrf, myrf, mzrf);
+      MadgwickQuaternionUpdate(axrf, ayrf, azrf, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxrf, myrf, mzrf);
       getAttitude(&yaw, &pitch, &roll);
          
       // Kalman extended filter
@@ -952,11 +1048,11 @@ double mxrf, myrf, mzrf; // values after LPF
       //EKFUpdateStatus(0.01, 0.01, 0.01, 0.01, 0.01, 1.01, deltat);
    }
    
-   snprintf(str, sizeof(str), "Yaw: %-4.1f", yaw);  
+   snprintf(str, sizeof(str), "Yaw:  %- 6.1f", yaw);  
    if (count%3==0) oledWriteString(0, 4, str, false);
-   snprintf(str, sizeof(str), "Pitch: %-4.0f", pitch);  
+   snprintf(str, sizeof(str), "Pitch:%- 4.0f", pitch);  
    if (count%3==1) oledWriteString(0, 5, str, false);        
-   snprintf(str, sizeof(str), "Roll: %-4.0f", roll);  
+   snprintf(str, sizeof(str), "Roll: %- 4.0f", roll);  
    if (count%3==2) oledWriteString(0, 6, str, false);  
    count++;
    
@@ -1145,8 +1241,26 @@ uint8_t byte;
    
    
    /************************* Final actions ***********************/   
-   // Initialize low pass filter for magnetometer data
-   LPFilter_init(&filter_x); LPFilter_init(&filter_y); LPFilter_init(&filter_z);
+   // Initialize low pass filter for interpolating magnetometer data
+   rc = LPFilter_init(&filter_mx, LP_20_240_filter_taps, sizeof(LP_20_240_filter_taps)/sizeof(double));
+   if (rc < 0) goto rw_error;  
+   LPFilter_init(&filter_my, LP_20_240_filter_taps, sizeof(LP_20_240_filter_taps)/sizeof(double));
+   if (rc < 0) goto rw_error;    
+   LPFilter_init(&filter_mz, LP_20_240_filter_taps, sizeof(LP_20_240_filter_taps)/sizeof(double));
+   if (rc < 0) goto rw_error; 
+   // Set gain to upsampling_factor, to compensate for DC gain reduction due to interpolation
+   LPFilter_DCgain(&filter_mx, upsampling_factor);  // No need for filter_my and filter_mz, as they share the LP_20_240_filter_taps
+   
+   // Initialize low pass filter for accelerometer data
+   rc = LPFilter_init(&filter_ax, LP_10_240_filter_taps, sizeof(LP_10_240_filter_taps)/sizeof(double));
+   if (rc < 0) goto rw_error;  
+   LPFilter_init(&filter_ay, LP_10_240_filter_taps, sizeof(LP_10_240_filter_taps)/sizeof(double));
+   if (rc < 0) goto rw_error;    
+   LPFilter_init(&filter_az, LP_10_240_filter_taps, sizeof(LP_10_240_filter_taps)/sizeof(double));
+   if (rc < 0) goto rw_error; 
+   LPFilter_DCgain(&filter_mx, 1.0);  // No need for filter_my and filter_mz, as they share the LP_10_240_filter_taps  
+   
+   
    // Start the IMU reading thread
    timerNumber = timer;
    rc = gpioSetTimerFunc(timerNumber, 1+lround(1000.0/odr_m_modes[ODR_M]), imuRead);  // Read IMU with magnetometer ODR, timer#3
@@ -1175,6 +1289,8 @@ void closeLSM9DS1(void)
       i2cWriteByteData(i2c_accel_handle, 0x10, 0x00); // Power down accel/gyro
       i2cClose(i2c_accel_handle);
    }
+   LPFilter_close(&filter_mx); LPFilter_close(&filter_my); LPFilter_close(&filter_mz);
+   LPFilter_close(&filter_ax); LPFilter_close(&filter_ay); LPFilter_close(&filter_az);
    i2c_accel_handle = -1;
    i2c_mag_handle = -1;
 }
@@ -1191,20 +1307,18 @@ int fd;
       fclose(accel_fp);
       accel_fp = NULL;
       printf("Close accelerometer data file\n");
+      return;
    }
-   else {
-      strcpy(filename, template);
-      fd = mkstemps(filename, 4);  // Generate unique file. Suffix length is 4: ".csv"
-      if (fd == -1) ERR(, "Cannot create file: %s", strerror(errno))
-      else {
-         accel_fp = fdopen(fd, "w");
-         if (accel_fp == NULL) ERR(, "Cannot open file %s: %s", filename, strerror(errno))
-         else {
-            printf("Saving accelerometer data in file %s\n", filename); 
-            fprintf(accel_fp, "X; Y; Z\n");
-         }
-      }
-   }
+
+   strcpy(filename, template);
+   fd = mkstemps(filename, 4);  // Generate unique file. Suffix length is 4: ".csv"
+   if (fd == -1) ERR(, "Cannot create file: %s", strerror(errno))
+   
+   accel_fp = fdopen(fd, "w");
+   if (accel_fp == NULL) ERR(, "Cannot open file %s: %s", filename, strerror(errno));
+   
+   printf("Saving accelerometer data in file %s\n", filename); 
+   fprintf(accel_fp, "X; Y; Z\n");
 }
 
 
