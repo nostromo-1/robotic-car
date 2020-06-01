@@ -43,7 +43,8 @@ Magnetic field strength of Earth is about 0.5 gauss, 500 mGauss, 50 uTeslas or 5
          fprintf(stderr, "%s: " format "\n" , __func__ , ## arg);      \
          return ret;                                                   \
    }
-   
+
+#define STD_DEV(s1, s2, N) sqrt(((s2) - ((s1)*(s1))/(double)(N))/((N)-1))
    
 #define I2C_BUS 1   // i2c bus of IMU: Bus 0 for Rev 1 boards, bus 1 for newer boards
 
@@ -140,7 +141,6 @@ static void calibrate_magnetometer(void);
 static double ellipsoid_fit(SampleList_t *sample_list);
 static double compute_error(double Vx, double Vy, double Vz, double A, double B, double C, 
                             double Bm, SampleList_t *sample_list);
-static void compute_deviation(double *deviations, SampleList_t *sample_list);
 static void MadgwickQuaternionUpdate(double ax, double ay, double az, double gx, double gy, double gz, 
                                      double mx, double my, double mz);
                                      
@@ -496,43 +496,6 @@ rw_error:
 
 
 
-/* 
-Compute the standard deviation of the samples in xvalues, yvalues and zvalues
-Store them in 'deviations'
-*/
-static void compute_deviation(double *deviations, SampleList_t *sample_list)
-{
-int i;
-double v;
-double sum_x, sum_y, sum_z; 
-double mean_x, mean_y, mean_z;
-   
-   /* Compute the mean */
-   sum_x = sum_y = sum_z = 0.0;
-   for (i=0; i<sample_list->num_elems; i++) {
-      sum_x += (double)sample_list->xvalues[i];
-      sum_y += (double)sample_list->yvalues[i];
-      sum_z += (double)sample_list->zvalues[i];
-   }
-   mean_x = sum_x/sample_list->num_elems; mean_y = sum_y/sample_list->num_elems; mean_z = sum_z/sample_list->num_elems;
-
-   /* Compute the std deviation */
-   sum_x = sum_y = sum_z = 0.0;
-   for (i=0; i<sample_list->num_elems; i++) {
-      v = (double)sample_list->xvalues[i] - mean_x;
-      sum_x += v*v;
-      v = (double)sample_list->yvalues[i] - mean_y;
-      sum_y += v*v;
-      v = (double)sample_list->zvalues[i] - mean_z;
-      sum_z += v*v;
-   }
-   
-   deviations[0] = sqrt(sum_x/(sample_list->num_elems-1));
-   deviations[1] = sqrt(sum_y/(sample_list->num_elems-1));
-   deviations[2] = sqrt(sum_z/(sample_list->num_elems-1));
-}
-
-
  
  /* 
  Calibrate accelerometer and gyroscope. The IMU should rest horizontal, so that
@@ -544,35 +507,22 @@ static void calibrate_accel_gyro(void)
 int16_t gx, gy, gz; // x, y, and z axis readings of the gyroscope
 int16_t ax, ay, az; // x, y, and z axis readings of the accelerometer   
 char buf[12];
-int i, rc, max_num_samples, elapsed_useconds; 
-int32_t x, y, z;
+int i, rc, elapsed_useconds, samples; 
+int32_t s1_ax=0, s1_ay=0, s1_az=0; 
+int32_t s2_ax=0, s2_ay=0, s2_az=0;
+int32_t s1_gx=0, s1_gy=0, s1_gz=0; 
+int32_t s2_gx=0, s2_gy=0, s2_gz=0;
 uint32_t start_tick;   
-SampleList_t sample_list_a = {.xvalues=NULL, .yvalues=NULL, .zvalues=NULL, .num_elems=0};  
-SampleList_t sample_list_g = {.xvalues=NULL, .yvalues=NULL, .zvalues=NULL, .num_elems=0};  
-const int cal_seconds = 3; // Number of seconds to take samples
+const int cal_seconds = 4; // Number of seconds to take samples
    
-   
-   max_num_samples = cal_seconds * odr_ag_modes[ODR_AG];
-   if (!(sample_list_a.xvalues = calloc(max_num_samples, sizeof(int))) || 
-       !(sample_list_a.yvalues = calloc(max_num_samples, sizeof(int))) || 
-       !(sample_list_a.zvalues = calloc(max_num_samples, sizeof(int)))) {
-      fprintf(stderr, "%s: cannot allocate memory: %s\n", __func__, strerror(errno));
-      goto rw_error; 
-   }
-   if (!(sample_list_g.xvalues = calloc(max_num_samples, sizeof(int))) || 
-       !(sample_list_g.yvalues = calloc(max_num_samples, sizeof(int))) || 
-       !(sample_list_g.zvalues = calloc(max_num_samples, sizeof(int)))) {
-      fprintf(stderr, "%s: cannot allocate memory: %s\n", __func__, strerror(errno));
-      goto rw_error; 
-   }   
-
    printf("Calibrating accelerometer and gyroscope. Leave robot car horizontal...\n");
    gpioSleep(PI_TIME_RELATIVE, 1, 0); // 1 second delay
    
    start_tick = gpioTick();
    elapsed_useconds = 0; 
+   samples = 0;
    do {
-      gpioDelay(lround(1E6/odr_ag_modes[ODR_AG]));   // Wait for new data to arrive, acc. ODR selected (8.4 ms for 119 Hz)
+      gpioDelay(lround(1E6/odr_ag_modes[ODR_AG]));   // Wait for new data to arrive, acc. ODR selected (4.2 ms for 238 Hz)
       rc = i2cReadByteData(i2c_accel_handle, 0x27);  // Read STATUS_REG register
       if (rc < 0) goto rw_error;  
       if (rc&0x01) {  // New accelerometer data available
@@ -586,60 +536,42 @@ const int cal_seconds = 3; // Number of seconds to take samples
             right handed, and filter algorithms work correctly */
          gy = buf[1]<<8 | buf[0]; gx = buf[3]<<8 | buf[2]; gz = buf[5]<<8 | buf[4];
          ay = buf[7]<<8 | buf[6]; ax = buf[9]<<8 | buf[8]; az = buf[11]<<8 | buf[10]; 
+         az -= (int32_t)(1/aRes);  // Expected value for az is 1g, not 0g
          
-         if (sample_list_a.num_elems < max_num_samples) {
-            sample_list_a.xvalues[sample_list_a.num_elems] = ax; 
-            sample_list_a.yvalues[sample_list_a.num_elems] = ay; 
-            sample_list_a.zvalues[sample_list_a.num_elems] = az;
-            sample_list_a.num_elems++;
-            
-            sample_list_g.xvalues[sample_list_g.num_elems] = gx; 
-            sample_list_g.yvalues[sample_list_g.num_elems] = gy; 
-            sample_list_g.zvalues[sample_list_g.num_elems] = gz;
-            sample_list_g.num_elems++;            
-         }
+         s1_ax += ax; s2_ax += (int32_t)ax*(int32_t)ax; 
+         s1_ay += ay; s2_ay += (int32_t)ay*(int32_t)ay; 
+         s1_az += az; s2_az += (int32_t)az*(int32_t)az; 
+         s1_gx += gx; s2_gx += (int32_t)gx*(int32_t)gx; 
+         s1_gy += gy; s2_gy += (int32_t)gy*(int32_t)gy; 
+         s1_gz += gz; s2_gz += (int32_t)gz*(int32_t)gz;              
+         samples++;
       }
       elapsed_useconds = gpioTick() - start_tick;   
-   } while (elapsed_useconds < cal_seconds*1E6);  // loop for 3 seconds
-
-   // Calculate std deviation with the stored samples
-   compute_deviation(deviation_AL, &sample_list_a);  
-   printf("a sigma_x:%.2f, a sigma_y:%.2f, a sigma_z:%.2f\n", deviation_AL[0], deviation_AL[1], deviation_AL[2]);
-   compute_deviation(deviation_GY, &sample_list_g);  
-   printf("g sigma_x:%.2f, g sigma_y:%.2f, g sigma_z:%.2f\n", deviation_GY[0], deviation_GY[1], deviation_GY[2]);   
+   } while (elapsed_useconds < cal_seconds*1E6);  // loop for 4 seconds  
          
-   // Calculate the mean of accelerometer biases
-   for (x=y=z=i=0; i<sample_list_a.num_elems; i++) {
-      x += sample_list_a.xvalues[i];
-      y += sample_list_a.yvalues[i];
-      z += sample_list_a.zvalues[i];   
-   }
-   // Store the mean in variable err_AL
-   err_AL[0] = x/sample_list_a.num_elems; err_AL[1] = y/sample_list_a.num_elems; err_AL[2] = z/sample_list_a.num_elems-(int32_t)(1/aRes); 
-   //printf("err_AL: %d %d %d\n", err_AL[0], err_AL[1], err_AL[2]);
+   // Calculate the mean of accelerometer biases and store it in variable err_AL
+   err_AL[0] = s1_ax/samples; err_AL[1] = s1_ay/samples; err_AL[2] = s1_az/samples; 
+   printf("Accelerometer bias: %d %d %d\n", err_AL[0], err_AL[1], err_AL[2]);
    
-   // Calculate the mean of gyroscope biases
-   for (x=y=z=i=0; i<sample_list_g.num_elems; i++) {
-      x += sample_list_g.xvalues[i];
-      y += sample_list_g.yvalues[i];
-      z += sample_list_g.zvalues[i];   
-   }
-   // Store the mean in variable err_GY   
-   err_GY[0] = x/sample_list_g.num_elems; err_GY[1] = y/sample_list_g.num_elems; err_GY[2] = z/sample_list_g.num_elems; 
-   //printf("err_GY: %d %d %d\n", err_GY[0], err_GY[1], err_GY[2]);   
-
-   free(sample_list_a.xvalues); free(sample_list_a.yvalues); free(sample_list_a.zvalues);  
-   free(sample_list_g.xvalues); free(sample_list_g.yvalues); free(sample_list_g.zvalues);    
+   // Calculate the mean of gyroscope biases and store it in variable err_GY   
+   err_GY[0] = s1_gx/samples; err_GY[1] = s1_gy/samples; err_GY[2] = s1_gz/samples; 
+   printf("Gyroscope bias: %d %d %d\n", err_GY[0], err_GY[1], err_GY[2]);   
+ 
+   // Calculate std deviation
+   deviation_AL[0] = STD_DEV(s1_ax, s2_ax, samples);
+   deviation_AL[1] = STD_DEV(s1_ay, s2_ay, samples);
+   deviation_AL[2] = STD_DEV(s1_az, s2_az, samples); 
+   printf("Accelerometer std dev: sigma_x=%.2f, sigma_y=%.2f, sigma_z=%.2f\n", deviation_AL[0], deviation_AL[1], deviation_AL[2]);
+   
+   deviation_GY[0] = STD_DEV(s1_gx, s2_gx, samples); 
+   deviation_GY[1] = STD_DEV(s1_gy, s2_gy, samples); 
+   deviation_GY[2] = STD_DEV(s1_gz, s2_gz, samples);
+   printf("Gyroscope std dev: sigma_x=%.2f, sigma_y=%.2f, sigma_z=%.2f\n", deviation_GY[0], deviation_GY[1], deviation_GY[2]);   
+    
    printf("Done\n");
    return;
   
 rw_error:
-   if (sample_list_a.xvalues) free(sample_list_a.xvalues); 
-   if (sample_list_a.yvalues) free(sample_list_a.yvalues); 
-   if (sample_list_a.zvalues) free(sample_list_a.zvalues);
-   if (sample_list_g.xvalues) free(sample_list_g.xvalues); 
-   if (sample_list_g.yvalues) free(sample_list_g.yvalues); 
-   if (sample_list_g.zvalues) free(sample_list_g.zvalues);
    err_AL[0] = err_AL[1] = err_AL[2] = 0;
    err_GY[0] = err_GY[1] = err_GY[2] = 0; 
    ERR(, "Cannot read/write data from IMU");
@@ -667,8 +599,10 @@ SampleList_t sample_list = {.xvalues=NULL, .yvalues=NULL, .zvalues=NULL, .num_el
 int16_t mx, my, mz; // x, y, and z axis readings of the magnetometer
 int min_x=INT16_MAX, min_y=INT16_MAX, min_z=INT16_MAX;
 int max_x=INT16_MIN, max_y=INT16_MIN, max_z=INT16_MIN;
+int64_t s1_mx=0, s1_my=0, s1_mz=0;
+int64_t s2_mx=0, s2_my=0, s2_mz=0;
 int rad_x, rad_y, rad_z;
-bool first_time = true;
+bool do_first_part = true;
 double rad_mean, mean_cuad_error;
 const int cal_seconds = 60; // Number of seconds to take samples
 const int error_meas_seconds = 2;  // Number of seconds for error measurement, must be less than 'seconds'
@@ -704,6 +638,8 @@ const int error_meas_seconds = 2;  // Number of seconds for error measurement, m
          my = buf[1]<<8 | buf[0]; mx = buf[3]<<8 | buf[2]; mz = buf[5]<<8 | buf[4];  
          my *= -1;         
          if (sample_list.num_elems < max_num_samples) {
+            s1_mx += mx; s1_my += my; s1_mz += mz;
+            s2_mx += (int64_t)mx*(int64_t)mx; s2_my += (int64_t)my*(int64_t)my; s2_mz += (int64_t)mz*(int64_t)mz;
             sample_list.xvalues[sample_list.num_elems] = mx; 
             sample_list.yvalues[sample_list.num_elems] = my; 
             sample_list.zvalues[sample_list.num_elems] = mz;
@@ -713,11 +649,14 @@ const int error_meas_seconds = 2;  // Number of seconds for error measurement, m
          // The first 2 seconds, the car is stationary. Take samples and then calculate std deviation of error
          if (elapsed_useconds > error_meas_seconds*1E6) {  
          // More than 2 seconds elapsed. Now, perform calibration
-            if (first_time) {
-               compute_deviation(deviation_MA, &sample_list);  // Calculate std deviation with the stored samples
-               printf("m sigma_x:%.2f, m sigma_y:%.2f, m sigma_z:%.2f\n", deviation_MA[0], deviation_MA[1], deviation_MA[2]);
+            if (do_first_part) {
+               // Calculate std deviation with the stored samples
+               deviation_MA[0] = STD_DEV(s1_mx, s2_mx, sample_list.num_elems);
+               deviation_MA[1] = STD_DEV(s1_my, s2_my, sample_list.num_elems);
+               deviation_MA[2] = STD_DEV(s1_mz, s2_mz, sample_list.num_elems);
+               printf("Magnetometer std dev: sigma_x=%.2f, sigma_y=%.2f, sigma_z=%.2f\n\n", deviation_MA[0], deviation_MA[1], deviation_MA[2]);
                printf("Rotate robot car slowly in all directions for %d seconds...\n", cal_seconds);
-               first_time = false;
+               do_first_part = false;
                sample_list.num_elems = 0; // Restart writing from the beginning, so only calibration values are stored 
             }
             else {
@@ -728,7 +667,7 @@ const int error_meas_seconds = 2;  // Number of seconds for error measurement, m
          }
       }
       elapsed_useconds = gpioTick() - start_tick;   
-   } while (elapsed_useconds<(error_meas_seconds+cal_seconds)*1E6);  // loop for 60 seconds
+   } while (elapsed_useconds<(error_meas_seconds+cal_seconds)*1E6);  // loop for 60+2 seconds
    fclose(fp);
    
    /****** Now estimate hardiron and softiron effects ******/
@@ -1037,14 +976,14 @@ double mxrf, myrf, mzrf; // values after LPF
       */
          
       // 3D compass; valid if car does not accelerate (ie, only acceleration is gravity)
-      //updateOrientation(axr, ayr, azr, mxrf, myrf, mzrf);   
+      //updateOrientation(axrf, ayrf, azrf, mxrf, myrf, mzrf);   
       
       // Update sensor fusion filter with the data gathered
       MadgwickQuaternionUpdate(axrf, ayrf, azrf, gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, mxrf, myrf, mzrf);
       getAttitude(&yaw, &pitch, &roll);
          
       // Kalman extended filter
-      //EKFUpdateStatus(gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, axr, ayr, azr, deltat);
+      //EKFUpdateStatus(gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, axrf, ayrf, azrf, deltat);
       //EKFUpdateStatus(0.01, 0.01, 0.01, 0.01, 0.01, 1.01, deltat);
    }
    
