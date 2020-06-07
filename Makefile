@@ -1,24 +1,31 @@
 
-CC=gcc
-CFLAGS=-I. -O
+EXE := robot
+SRC_DIR := src
+OBJ_DIR := src
 DEBUG = -g
-DEPS = 
-OBJS = motor.o sound.o oled96.o imu.o ekf.o pcf8591.o bmp280.o
+CFLAGS := -O $(DEBUG)
+SRC := $(wildcard $(SRC_DIR)/*.c)
+OBJ := $(SRC:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+
 BTLIBS = -lcwiid -lbluetooth
 PIOLIBS = -lpigpio -lpthread
 AUDIOLIBS = -lasound
 MATHLIB = -lm
-
-
-%.o: %.c $(DEPS)
-	$(CC) -c -o $@ $< $(CFLAGS) $(DEBUG)
+LIBS := $(BTLIBS) $(PIOLIBS) $(AUDIOLIBS) $(MATHLIB)
 
 
 
-robot: $(OBJS)
-	$(CC) -o $@ $^ $(CFLAGS) $(PIOLIBS) $(BTLIBS) $(AUDIOLIBS) $(MATHLIB) 	
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	$(CC) -I$(SRC_DIR) $(CFLAGS) -c $< -o $@
+
+
+all: $(EXE)
+
+$(EXE): $(OBJ)
+	$(CC) $^ $(LIBS) -o $@
 	sudo chown root $@ 
 	sudo chmod u+s $@
 
+
 clean:
-	rm -f $(OBJS) robot
+	$(RM) $(OBJ) $(EXE)
