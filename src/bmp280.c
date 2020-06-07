@@ -6,8 +6,8 @@ It reads temperature and atmosferic pressure
 300 to 1100 hPa operational range
 Pressure typical absolute accuracy +-1.0 hPa, maximum absolute accuracy +-2.5 hPa 
 Pressure typical relative accuracy +-0.12 hPa
--40 to +85캜 operational range, +-1캜 temperature accuracy between 0 and 65 캜
-Temperature typical accuracy +-0.5캜 at 25캜
+-40 to +85째C operational range, +-1째C temperature accuracy between 0 and 65 째C
+Temperature typical accuracy +-0.5째C at 25째C
 
 *****************************************************************************/
 
