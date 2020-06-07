@@ -18,8 +18,8 @@ The reference axis in this module are the following, looking from above the car:
 
               Z axis points above the car (right handed orientation)
 
-The LSM9DS1 has a linear acceleration full scale of ±2g/±4g/±8/±16 g, 
-a magnetic field full scale of ±4/±8/±12/±16 gauss and an angular rate of ±245/±500/±2000 dps
+The LSM9DS1 has a linear acceleration full scale of Â±2g/Â±4g/Â±8/Â±16 g, 
+a magnetic field full scale of Â±4/Â±8/Â±12/Â±16 gauss and an angular rate of Â±245/Â±500/Â±2000 dps
 
 Magnetic field strength of Earth is about 0.5 gauss, 500 mGauss, 50 uTeslas or 50000 nTeslas
 
@@ -763,7 +763,7 @@ const double delta = 0.001;
       dVz = (compute_error(Vx, Vy, Vz+delta, A, B, C, Bm, sample_list)-err)/delta;
       
       /* Calculate new point in direction of negative gradient, separately for each 3 dimension space */
-      step = 1.0/(2+iter);  // we use 1.0 instead of 2.0 (as is usual eg in Frank–Wolfe algorithm) to get smaller steps
+      step = 1.0/(2+iter);  // we use 1.0 instead of 2.0 (as is usual eg in FrankÂ–Wolfe algorithm) to get smaller steps
       A -= dA*step/sqrt(dA*dA+dB*dB+dC*dC);
       B -= dB*step/sqrt(dA*dA+dB*dB+dC*dC);  
       C -= dC*step/sqrt(dA*dA+dB*dB+dC*dC);  
@@ -1273,7 +1273,7 @@ int fd;
 // applied in the correct order which for this configuration is yaw, pitch, and then roll.
 // For more see http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles which has additional links.
 // See https://en.wikipedia.org/wiki/Euler_angles for more information.
-// Yaw, pitch and roll are the Tait-Bryan angles in a z-y’-x'' intrinsic rotation
+// Yaw, pitch and roll are the Tait-Bryan angles in a z-yÂ’-x'' intrinsic rotation
 int getAttitude(double *yaw, double *pitch, double *roll)
 {
    *yaw   = atan2(2.0 * (q[1]*q[2] + q[0]*q[3]), q[0]*q[0] + q[1]*q[1] - q[2]*q[2] - q[3]*q[3]);  
