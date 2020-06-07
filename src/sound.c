@@ -1,5 +1,5 @@
 /**********************************************************************************
-Cödigo fuente del proyecto de coche robótico
+CÃ¶digo fuente del proyecto de coche robÃ³tico
 Fichero: sound.c
 Fecha: 21/2/2017
 
@@ -150,7 +150,7 @@ void* play_wav(void *filename)
         fprintf(stderr, "Error en fichero %s: %s\n", filename, strerror(errno));    
         pthread_exit(NULL);
     }
-    /* Mapea sección inicial de 12 bytes */
+    /* Mapea secciÃ³n inicial de 12 bytes */
     mem = p = mmap(NULL, 12, PROT_READ, MAP_SHARED, fd, 0);
     if (mem == MAP_FAILED) {
         fprintf(stderr, "Error al mapear fichero en memoria\n");
@@ -174,13 +174,13 @@ void* play_wav(void *filename)
     }
     
     munmap(mem, 12);
-    if (filelen > 50000000) {  // Random: evita ficheros grandes dañados
+    if (filelen > 50000000) {  // Random: evita ficheros grandes daÃ±ados
         fprintf(stderr, "Error: mal fichero de audio\n");    
         close(fd);
         pthread_exit(NULL);                
     }
 
-    /* Sección inicial correcta. Mapea fichero completo */    
+    /* SecciÃ³n inicial correcta. Mapea fichero completo */    
     mem = mmap(NULL, filelen, PROT_READ, MAP_SHARED, fd, 0);
     close(fd);
     if (mem == MAP_FAILED) {
