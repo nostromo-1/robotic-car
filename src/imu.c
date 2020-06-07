@@ -18,8 +18,8 @@ The reference axis in this module are the following, looking from above the car:
 
               Z axis points above the car (right handed orientation)
 
-The LSM9DS1 has a linear acceleration full scale of Â±2g/Â±4g/Â±8/Â±16 g, 
-a magnetic field full scale of Â±4/Â±8/Â±12/Â±16 gauss and an angular rate of Â±245/Â±500/Â±2000 dps
+The LSM9DS1 has a linear acceleration full scale of ±2g/±4g/±8/±16 g, 
+a magnetic field full scale of ±4/±8/±12/±16 gauss and an angular rate of ±245/±500/±2000 dps
 
 Magnetic field strength of Earth is about 0.5 gauss, 500 mGauss, 50 uTeslas or 50000 nTeslas
 
@@ -283,8 +283,6 @@ static double LP_10_240_filter_taps[] = {
 
 static int LPFilter_init(Filter_t *f, double *tap_array, unsigned tap_list_size) 
 {
-int i;
-
    if (f == NULL) ERR(-1, "Invalid filter descriptor");
    if (tap_array == NULL || tap_list_size == 0) ERR(-1, "Invalid tap array for filter");
    f->last_index = 0;
@@ -307,10 +305,12 @@ static void LPFilter_DCgain(Filter_t *f, double gain_value)
 int i;
 double DC_gain = 0;  
 
+   if (f == NULL) ERR(, "Invalid filter descriptor");
    // Calculate current DC gain
-   for (i = 0; i < f->taps_num; ++i) DC_gain += f->taps[i];
+   for (i = 0; i < f->taps_num; i++) DC_gain += f->taps[i];
+   if (DC_gain == 0) ERR(, "DC gain of filter is zero, cannot set gain");
    // Now, change taps so that the new DC gain is 'gain_value'
-   for (i = 0; i < f->taps_num; ++i) f->taps[i] *= gain_value/DC_gain;     
+   for (i = 0; i < f->taps_num; i++) f->taps[i] *= gain_value/DC_gain;     
 }
 
 
@@ -327,8 +327,8 @@ static double LPFilter_get(Filter_t *f)
   double acc = 0;
   int index = f->last_index, i;
   
-  for (i = 0; i < f->taps_num; ++i) {
-    index = index != 0 ? index-1 : f->taps_num-1;
+  for (i = 0; i < f->taps_num; i++) {
+    index = (index != 0) ? index-1 : f->taps_num-1;
     acc += f->history[index] * f->taps[i];
   }
   return acc;
@@ -536,7 +536,7 @@ const int cal_seconds = 4; // Number of seconds to take samples
             right handed, and filter algorithms work correctly */
          gy = buf[1]<<8 | buf[0]; gx = buf[3]<<8 | buf[2]; gz = buf[5]<<8 | buf[4];
          ay = buf[7]<<8 | buf[6]; ax = buf[9]<<8 | buf[8]; az = buf[11]<<8 | buf[10]; 
-         az -= (int32_t)(1/aRes);  // Expected value for az is 1g, not 0g
+         az -= (int16_t)(1.0/aRes);  // Expected value for az is 1g, not 0g
          
          s1_ax += ax; s2_ax += (int32_t)ax*(int32_t)ax; 
          s1_ay += ay; s2_ay += (int32_t)ay*(int32_t)ay; 
@@ -763,7 +763,7 @@ const double delta = 0.001;
       dVz = (compute_error(Vx, Vy, Vz+delta, A, B, C, Bm, sample_list)-err)/delta;
       
       /* Calculate new point in direction of negative gradient, separately for each 3 dimension space */
-      step = 1.0/(2+iter);  // we use 1.0 instead of 2.0 (as is usual eg in FrankÂ–Wolfe algorithm) to get smaller steps
+      step = 1.0/(2+iter);  // we use 1.0 instead of 2.0 (as is usual eg in Frank–Wolfe algorithm) to get smaller steps
       A -= dA*step/sqrt(dA*dA+dB*dB+dC*dC);
       B -= dB*step/sqrt(dA*dA+dB*dB+dC*dC);  
       C -= dC*step/sqrt(dA*dA+dB*dB+dC*dC);  
@@ -826,7 +826,7 @@ For each value of the accel/gyro, the fusion filter and the 3D compensated compa
 the same previously read magnetometer data. It works OK, although the sampling rates are different.
 Better solution (but seems unnecessary) would be to oversample the magnetometer data.
 
-It takes about 5 ms to complete (mostly between 4.5 and 5.5 ms).
+It takes about 5 ms to complete (mostly between 4.5 and 5.5 ms) for ODR_M=40 Hz, ODR_AGG=238 Hz.
 */
 static void imuRead(void)
 {
@@ -848,6 +848,9 @@ double gxr, gyr, gzr;
 double mxr, myr, mzr; 
 double axrf, ayrf, azrf; // values after LPF
 double mxrf, myrf, mzrf; // values after LPF
+static double axr_previous;
+double dax;
+
 
    start_tick = gpioTick(); 
 
@@ -954,9 +957,11 @@ double mxrf, myrf, mzrf; // values after LPF
       mxrf = LPFilter_get(&filter_mx); myrf = LPFilter_get(&filter_my); mzrf = LPFilter_get(&filter_mz);
       
       /***************** sensor values are calculated. Now do whatever with them ********/
-      v_m += 9.81*axr * deltat;
+      v_m += 9.81*axrf * deltat;
       e_m += v_m*deltat;
       //printf("a=%f, v=%f, e=%f\n", 9.81*axr, v_m, e_m);
+      dax = axr - axr_previous;
+      if (fabs(dax) > 0.5) printf("Collision detected!\n");
       
       /*
       snprintf(str, sizeof(str), "AX:% 7.1f mg", axr*1000);  
@@ -985,6 +990,7 @@ double mxrf, myrf, mzrf; // values after LPF
       // Kalman extended filter
       //EKFUpdateStatus(gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, axrf, ayrf, azrf, deltat);
       //EKFUpdateStatus(0.01, 0.01, 0.01, 0.01, 0.01, 1.01, deltat);
+      axr_previous = axr;
    }
    
    snprintf(str, sizeof(str), "Yaw:  %- 6.1f", yaw);  
@@ -1016,10 +1022,7 @@ int16_t temp;
 uint8_t byte;
 
    /***** Initial checks *****/
-   if (odr_ag_modes[ODR_AG] < odr_m_modes[ODR_M]) {
-      fprintf(stderr, "%s: Invalid ODR values for IMU\n", __FILE__);
-      return -1;
-   }
+   if (odr_ag_modes[ODR_AG] < odr_m_modes[ODR_M]) ERR(-1, "Invalid ODR values for IMU");
    upsampling_factor = lround(odr_ag_modes[ODR_AG] / odr_m_modes[ODR_M]);
 
    /************************* Open connection and check state ***********************/
@@ -1027,17 +1030,26 @@ uint8_t byte;
    if (i2c_accel_handle < 0) ERR(-1, "Cannot open accelerometer/gyroscope device");
    
    i2c_mag_handle = i2cOpen(I2C_BUS, mag_addr, 0);
-   if (i2c_mag_handle < 0) ERR(-1, "Cannot open magnetometer device");
+   if (i2c_mag_handle < 0) {
+      closeLSM9DS1();
+      ERR(-1, "Cannot open magnetometer device");
+   }
 
    // Check acelerometer/gyroscope   
    rc = i2cReadByteData(i2c_accel_handle, 0x0F);  // Read WHO_AM_I register
    if (rc < 0) goto rw_error;
-   if (rc != 0x68) ERR(-1, "Invalid data from accelerometer/gyroscope device");
+   if (rc != 0x68) {
+      closeLSM9DS1();
+      ERR(-1, "Invalid accelerometer/gyroscope device");
+   }
    
    // Check magnetometer  
    rc = i2cReadByteData(i2c_mag_handle, 0x0F);  // Read WHO_AM_I register
    if (rc < 0) goto rw_error;
-   if (rc != 0x3D) ERR(-1, "Invalid data from magnetometer device");  
+   if (rc != 0x3D) {
+      closeLSM9DS1();
+      ERR(-1, "Invalid magnetometer device");  
+   }
      
    /************************* Set Magnetometer ***********************/
    
@@ -1197,13 +1209,16 @@ uint8_t byte;
    if (rc < 0) goto rw_error;    
    LPFilter_init(&filter_az, LP_10_240_filter_taps, sizeof(LP_10_240_filter_taps)/sizeof(double));
    if (rc < 0) goto rw_error; 
-   LPFilter_DCgain(&filter_mx, 1.0);  // No need for filter_my and filter_mz, as they share the LP_10_240_filter_taps  
+   LPFilter_DCgain(&filter_ax, 1.0);  // No need for filter_ay and filter_az, as they share the LP_10_240_filter_taps  
    
    
    // Start the IMU reading thread
    timerNumber = timer;
    rc = gpioSetTimerFunc(timerNumber, 1+lround(1000.0/odr_m_modes[ODR_M]), imuRead);  // Read IMU with magnetometer ODR, timer#3
-   if (rc<0) ERR(-1, "Cannot set timer for IMU");
+   if (rc<0) {
+      closeLSM9DS1();
+      ERR(-1, "Cannot set timer for IMU");  
+   }
    
    return 0;
    
@@ -1273,7 +1288,7 @@ int fd;
 // applied in the correct order which for this configuration is yaw, pitch, and then roll.
 // For more see http://en.wikipedia.org/wiki/Conversion_between_quaternions_and_Euler_angles which has additional links.
 // See https://en.wikipedia.org/wiki/Euler_angles for more information.
-// Yaw, pitch and roll are the Tait-Bryan angles in a z-yÂ’-x'' intrinsic rotation
+// Yaw, pitch and roll are the Tait-Bryan angles in a z-y’-x'' intrinsic rotation
 int getAttitude(double *yaw, double *pitch, double *roll)
 {
    *yaw   = atan2(2.0 * (q[1]*q[2] + q[0]*q[3]), q[0]*q[0] + q[1]*q[1] - q[2]*q[2] - q[3]*q[3]);  

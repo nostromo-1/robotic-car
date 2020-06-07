@@ -1,11 +1,11 @@
 /**********************************************************************************
-CÃ¶digo fuente del proyecto de coche robÃ³tico
+Cödigo fuente del proyecto de coche robótico
 Fichero: motor.c
 Fecha: 21/2/2017
 
 Realiza el control principal del coche. Este fichero contiene el control de los motores, 
-el control del mando a distancia, el control del sonar, y la lÃ³gica principal.
-El control lo realizan varios threads que se comunican mediante variables atÃ³micas.
+el control del mando a distancia, el control del sonar, y la lógica principal.
+El control lo realizan varios threads que se comunican mediante variables atómicas.
 
 
 ***********************************************************************************/
@@ -59,21 +59,21 @@ extern int optind, opterr, optopt;
 
 
 /***************** Define constants and parameters ****************/
-#define DISTMIN 45        /* distancia en cm a la que entendemos que hay un obstÃ¡culo */
+#define DISTMIN 45        /* distancia en cm a la que entendemos que hay un obstáculo */
 #define INITIAL_SPEED 50  /* Entre 0 y 100% */
 #define SONARDELAY 50     /* Time in ms between sonar triggers */
-#define NUMPOS 3          /* NÃºmero de medidas de posiciÃ³n del sonar para promediar */
+#define NUMPOS 3          /* Número de medidas de posición del sonar para promediar */
 #define NUMPULSES 1920    /* Motor assumed is a DFRobot FIT0450 with encoder. 16 pulses per round, 1:120 gearbox */
 #define WHEELD 68         /* Wheel diameter in mm */
 #define KARRDELAY 150     /* Time in ms to wait between leds in KARR scan */
 
 
 /***************** I2C bus addresses ****************/
-#define PCF8591_I2C 0x48           /* DirecciÃ³n i2c del PCF8591 (AD/DA converter) */
-#define BMP280_I2C 0x76            /* DirecciÃ³n i2c del BMP280 (sensor temperatura/presiÃ³n) */
-#define DISPLAY_I2C 0x3C           /* DirecciÃ³n i2c del display SSD1306 */
-#define LSM9DS1_GYR_ACEL_I2C 0x6B  /* DirecciÃ³n i2c del mÃ³dulo acelerÃ³metro/giroscopio del IMU LSM9DS1 */
-#define LSM9DS1_MAG_I2C 0x1E       /* DirecciÃ³n i2c del mÃ³dulo magnetÃ³metro del IMU LSM9DS1 */
+#define PCF8591_I2C 0x48           /* Dirección i2c del PCF8591 (AD/DA converter) */
+#define BMP280_I2C 0x76            /* Dirección i2c del BMP280 (sensor temperatura/presión) */
+#define DISPLAY_I2C 0x3C           /* Dirección i2c del display SSD1306 */
+#define LSM9DS1_GYR_ACEL_I2C 0x6B  /* Dirección i2c del módulo acelerómetro/giroscopio del IMU LSM9DS1 */
+#define LSM9DS1_MAG_I2C 0x1E       /* Dirección i2c del módulo magnetómetro del IMU LSM9DS1 */
 
 
 
@@ -119,7 +119,7 @@ enum timers {TIMER0, TIMER1, TIMER2, TIMER3, TIMER4, TIMER5, TIMER6, TIMER7, TIM
 
 /** These are the shared memory variables used for thread intercommunication **/
 _Atomic uint32_t distance = UINT32_MAX;
-_Atomic int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botÃ³n pulsado (A/B)
+_Atomic int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 _Atomic bool esquivando; // Car is avoiding obstacle
 _Atomic bool stalled;    // Car is stalled: it does not change its distance to objects
 _Atomic bool scanningWiimote;  // User pressed scan button and car is scanning for wiimotes
@@ -227,7 +227,7 @@ void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
 
 
 
-/* Rota el coche a la derecha (dextrÃ³giro, sentido==CW) o a la izquierda (levÃ³giro, sentido==ACW) */
+/* Rota el coche a la derecha (dextrógiro, sentido==CW) o a la izquierda (levógiro, sentido==ACW) */
 void rota(Rotation_t rotation, Sentido_t marcha)  
 {
 Motor_t *pivot, *non_pivot;
@@ -440,7 +440,7 @@ static void desactivaPito(void)
 }
 
 
-/*  FunciÃ³n interna auxiliar */
+/*  Función interna auxiliar */
 static void* duerme_pitando(void *arg)
 {
     uint32_t decimas, s, m;
@@ -458,7 +458,7 @@ static void* duerme_pitando(void *arg)
 
 /* Toca el pito durante un tiempo (en decimas de segundo) 
 modo=0; pita en otro hilo; vuelve inmediatamente 
-modo=1; pita en este hilo, vuelve despuÃ©s de haber pitado */
+modo=1; pita en este hilo, vuelve después de haber pitado */
 void pito(uint32_t decimas, int modo)
 {
     pthread_t pth;
@@ -482,15 +482,15 @@ void pito(uint32_t decimas, int modo)
 /******************Funciones de audio ************************/
 
 
-/* Reproduce "file" en otro hilo si no se estÃ¡ reproduciendo nada. Si es el caso, cancela reproducciÃ³n y vuelve.
+/* Reproduce "file" en otro hilo si no se está reproduciendo nada. Si es el caso, cancela reproducción y vuelve.
 file debe ser un string invariable, en memoria 
 modo=0; vuelve inmediatamente, sin esperar el final
-modo=1; vuelve despuÃ©s de haber reproducido el fichero de audio */
+modo=1; vuelve después de haber reproducido el fichero de audio */
 void audioplay(char *file, int modo)
 {
     pthread_t pth;
     
-    /* Si ya estamos reproduciendo algo, manda seÃ±al de cancelaciÃ³n al thread de audio */
+    /* Si ya estamos reproduciendo algo, manda señal de cancelación al thread de audio */
     if (playing_audio) {
         atomic_store_explicit(&cancel_audio, true, memory_order_relaxed);  // Signal cancel to sound thread
         return;
@@ -533,7 +533,7 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
 
             /*** Botones + y - ***/           
             if (previous_buttons&CWIID_BTN_PLUS && ~mando.buttons&CWIID_BTN_PLUS) {
-                if (mando.buttons&CWIID_BTN_1) { /* sube volumen: buttons Â´1Â´ + Â´+Â´ */
+                if (mando.buttons&CWIID_BTN_1) { /* sube volumen: buttons ´1´ + ´+´ */
                     soundVolume += 2;
                     if (soundVolume > 100) soundVolume = 100;
                     setVolume(soundVolume);
@@ -544,9 +544,9 @@ static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_me
                 }
             }
             
-            /*** Botones + y - junto con botÃ³n Â´1Â´ ***/
+            /*** Botones + y - junto con botón ´1´ ***/
             if (previous_buttons&CWIID_BTN_MINUS && ~mando.buttons&CWIID_BTN_MINUS) {
-                 if (mando.buttons&CWIID_BTN_1) { /* baja volumen: buttons Â´1Â´ + Â´-Â´ */
+                 if (mando.buttons&CWIID_BTN_1) { /* baja volumen: buttons ´1´ + ´-´ */
                     soundVolume -= 2;
                     if (soundVolume < 0) soundVolume = 0;
                     setVolume(soundVolume);
@@ -607,7 +607,7 @@ bdaddr_t ba;
     cwiid_set_err(wiiErr);
     oledSetBitmap8x8(15*8, 0, NULL);  // 15: last position in line (0-15), clear BT icon
     oledBigMessage(0, "Scan... ");
-    pito(5, 1);   // Pita 5 dÃ©cimas para avisar que comienza bÃºsqueda de mando
+    pito(5, 1);   // Pita 5 décimas para avisar que comienza búsqueda de mando
     
     printf("Pulsa las teclas 1 y 2 en el mando de la Wii...\n");
     gpioSleep(PI_TIME_RELATIVE, 2, 0);  // para dar tiempo a desconectar el mando si estaba conectado
@@ -626,7 +626,7 @@ bdaddr_t ba;
     atomic_store_explicit(&mando.wiimote, (_Atomic cwiid_wiimote_t*)wiimote, memory_order_release);
     printf("Conectado al mando de la Wii\n");
     oledSetBitmap8x8(15*8, 0, bluetooth_glyph);  // Put BT icon
-    cwiid_set_rumble(wiimote, 1);  // seÃ±ala mediante zumbido el mando sincronizado
+    cwiid_set_rumble(wiimote, 1);  // señala mediante zumbido el mando sincronizado
     gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos
     cwiid_set_rumble(wiimote, 0);
     return;
@@ -640,11 +640,11 @@ static void* scanWiimotes(void *arg)
     fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);   // Para el coche mientras escanea wiimotes 
     atomic_store_explicit(&velocidadCoche, 0, memory_order_release);
 
-    oledWriteString(12*8, 1, "    ", false); // Borra mensaje de "Auto", si estÃ¡           
+    oledWriteString(12*8, 1, "    ", false); // Borra mensaje de "Auto", si está           
     setupWiimote(); 
     atomic_store_explicit(&velocidadCoche, INITIAL_SPEED, memory_order_release); // Nueva velocidad inicial, con o sin mando 
  
-    if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autÃ³nomo
+    if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
         oledWriteString(12*8, 1, "Auto", false);
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
@@ -702,7 +702,7 @@ Sentido_t s_izdo, s_dcho;
    if (mando.wiimote && mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
       v_izdo = v_dcho = velocidadCoche;
       if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
-      else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrÃ¡s (botÃ³n B), invierte sentido
+      else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrás (botón B), invierte sentido
     
       /*** Botones LEFT y RIGHT, giran el coche ***/
       if (mando.buttons&CWIID_BTN_RIGHT) {
@@ -728,7 +728,7 @@ Sentido_t s_izdo, s_dcho;
 
 /***************Funciones de control de la velocidad ********************/
 /* callback llamado cuando el pin LSENSOR_PIN o RSENSOR_PIN cambia de estado
-Se usa para medir la velocidad de rotaciÃ³n de las ruedas */
+Se usa para medir la velocidad de rotación de las ruedas */
 void speedSensor(int gpio, int level, uint32_t tick)
 {
 Motor_t *motor;
@@ -947,7 +947,7 @@ int r = 0;
    if (gpioCfgClock(5, PI_CLOCK_PCM, 0)<0) return 1;   /* Standard settings: Sample rate: 5 us, PCM clock */
    gpioCfgInterfaces(PI_DISABLE_FIFO_IF | PI_DISABLE_SOCK_IF);
    if (gpioInitialise()<0) return 1;
-   if (gpioSetSignalFunc(SIGINT, terminate)<0) return 1;  // Call Â´terminateÂ´ when Ctrl-C is pressed
+   if (gpioSetSignalFunc(SIGINT, terminate)<0) return 1;  // Call ´terminate´ when Ctrl-C is pressed
    
    // Restore signal actions to default, so program dumps core if they happen
    signal(SIGSEGV, SIG_DFL);  
@@ -983,7 +983,7 @@ int r = 0;
    setupLSM9DS1(LSM9DS1_GYR_ACEL_I2C, LSM9DS1_MAG_I2C, calibrateIMU, TIMER3);   // Setup IMU
    
    setupWiimote(); 
-   gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse despuÃ©s de setupWiimote
+   gpioSetAlertFunc(WMSCAN_PIN, wmScan);  // Call wmScan when button changes. Debe llamarse después de setupWiimote
    
    setupKarr();  // start KARR scanner effect
    oledSetInversion(false); // clear display
@@ -1045,7 +1045,7 @@ double volts;
       oledBigMessage(0, NULL);           
    }
 
-   if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autÃ³nomo
+   if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autónomo
         oledWriteString(12*8, 1, "Auto", false);    
    }
    
