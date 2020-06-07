@@ -6,15 +6,15 @@ Control of the audio amplifier
 
 *****************************************************************************/
 
-// Inicializa el interfaz de audio. Par·metro: el pin por el que se activa el amplificador
+// Inicializa el interfaz de audio. Par√°metro: el pin por el que se activa el amplificador
 void setupSound(int gpio);
 void closeSound(void);
 
 // Ajusta el volumen de audio; rango: 0-100
 void setVolume(int volume);
 
-// FunciÛn para reproducir un fichero WAV de audio en un thread propio
-void* play_wav(void *filename);  // FunciÛn en fichero sound.c
+// Funci√≥n para reproducir un fichero WAV de audio en un thread propio
+void* play_wav(void *filename);  // Funci√≥n en fichero sound.c
 
 
 
