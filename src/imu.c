@@ -32,6 +32,7 @@ Magnetic field strength of Earth is about 0.5 gauss, 500 mGauss, 50 uTeslas or 5
 #include <stdbool.h>
 #include <pigpio.h>
 #include <math.h>
+#include <stdatomic.h>
 
 #include "imu.h"
 #include "ekf.h"
@@ -49,6 +50,8 @@ Magnetic field strength of Earth is about 0.5 gauss, 500 mGauss, 50 uTeslas or 5
 #define I2C_BUS 1   // i2c bus of IMU: Bus 0 for Rev 1 boards, bus 1 for newer boards
 
 
+
+extern _Atomic bool collision;  // Car has crashed when moving forwards or backwards
 
 typedef struct {
     int *xvalues, *yvalues, *zvalues;
@@ -87,7 +90,9 @@ static const double odr_m_modes[] = {0.625,1.25,2.5,5,10,20,40,80};
 static int upsampling_factor;  /* upsampling_factor is the ratio between both ODRs */
 
 static Filter_t filter_mx, filter_my, filter_mz; /* Interpolating filters for magnetometer */
-static Filter_t filter_ax, filter_ay, filter_az; /* Noise reducction low pass filters for accelerometer */
+static Filter_t filter_ax, filter_ay, filter_az; /* Noise reduction low pass filters for accelerometer */
+static Filter_t filter_d1_ax;  /* High pass filter for 1st order derivation of forward acceleration */
+
 
 // gRes, aRes, and mRes store the current resolution for each sensor. 
 // Units of these values would be DPS (or g's or Gs's) per ADC tick.
@@ -106,8 +111,8 @@ static double deviation_MA[3];  // Measured standard deviation of x, y and z val
 
 static const char *cal_file = "calibration.dat"; // File where calibration data is stored
 static const char *dev_file = "deviation.dat";   // File where standard deviation data is stored
-static const double declination = +1.266;  // Local magnetic declination as given by http://www.magnetic-declination.com/
-static const double magneticField = 0.457;   // Magnitude of the local magnetic field in Gauss
+static const double declination = +1.266;   // Local magnetic declination as given by http://www.magnetic-declination.com/
+static const double magneticField = 0.457;  // Magnitude of the local magnetic field in Gauss (does not need to be exact)
 
 /* Madgwick filter variables */
 static double q[4] = {1.0, 0.0, 0.0, 0.0};    // vector to hold quaternion
@@ -138,9 +143,9 @@ double roll, pitch, yaw, tilt;
 static void imuRead(void);
 static void calibrate_accel_gyro(void);
 static void calibrate_magnetometer(void);
-static double ellipsoid_fit(SampleList_t *sample_list);
-static double compute_error(double Vx, double Vy, double Vz, double A, double B, double C, 
-                            double Bm, SampleList_t *sample_list);
+static double ellipsoid_fit(const SampleList_t *sample_list);
+static double quad_error_function(double Vx, double Vy, double Vz, double A, double B, double C, 
+                            double Bm, const SampleList_t *sample_list);
 static void MadgwickQuaternionUpdate(double ax, double ay, double az, double gx, double gy, double gz, 
                                      double mx, double my, double mz);
                                      
@@ -281,6 +286,16 @@ static double LP_10_240_filter_taps[] = {
 };
 
 
+/*
+1st order derivative, using backward finite difference with a second-order accuracy
+*/
+static double HP_1st_deriv_filter_taps[] = {
+  1.5,
+  -2.0,
+  0.5  
+};
+
+
 static int LPFilter_init(Filter_t *f, double *tap_array, unsigned tap_list_size) 
 {
    if (f == NULL) ERR(-1, "Invalid filter descriptor");
@@ -300,7 +315,7 @@ static double LPFilter_close(Filter_t *f)
 }
 
 
-static void LPFilter_DCgain(Filter_t *f, double gain_value)
+static void LPFilter_setDCgain(Filter_t *f, double gain_value)
 {
 int i;
 double DC_gain = 0;  
@@ -322,7 +337,7 @@ static void LPFilter_put(Filter_t *f, double input)
 }
 
 
-static double LPFilter_get(Filter_t *f) 
+static double LPFilter_get(const Filter_t *f) 
 {
   double acc = 0;
   int index = f->last_index, i;
@@ -364,7 +379,6 @@ See also https://en.wikipedia.org/wiki/Davenport_chained_rotations
 */
 void updateOrientation(double ax, double ay, double az, double mx, double my, double mz)
 {
-//double yaw, pitch, roll, tilt;
 double sinpitch, cospitch, sinroll, cosroll, rootayaz, rootaxayaz, alpha=0.05;
   
    rootayaz = sqrt(ay*ay+az*az);
@@ -500,7 +514,9 @@ rw_error:
  /* 
  Calibrate accelerometer and gyroscope. The IMU should rest horizontal, so that
  measured accel values should be (0,0,1) and measured gyro values should be (0,0,0)
- It writes the measured error in global variables err_AL and err_GY
+ It writes the measured error in global variables err_AL and err_GY.
+ It also calculates the standard deviation of the measured values.
+ It writes the measured deviation in global variables deviation_AL and deviation_GY.
  */
 static void calibrate_accel_gyro(void)
 {
@@ -508,11 +524,11 @@ int16_t gx, gy, gz; // x, y, and z axis readings of the gyroscope
 int16_t ax, ay, az; // x, y, and z axis readings of the accelerometer   
 char buf[12];
 int i, rc, elapsed_useconds, samples; 
-int32_t s1_ax=0, s1_ay=0, s1_az=0; 
-int32_t s2_ax=0, s2_ay=0, s2_az=0;
-int32_t s1_gx=0, s1_gy=0, s1_gz=0; 
-int32_t s2_gx=0, s2_gy=0, s2_gz=0;
-uint32_t start_tick;   
+int32_t s1_ax=0, s1_ay=0, s1_az=0;  // Sum of the accel samples
+int32_t s2_ax=0, s2_ay=0, s2_az=0;  // Sum of the squares of the accel samples
+int32_t s1_gx=0, s1_gy=0, s1_gz=0;  // Sum of the gyro samples
+int32_t s2_gx=0, s2_gy=0, s2_gz=0;  // Sum of the squares of the gyro samples
+uint32_t start_tick;   // Initial tick when entering the function
 const int cal_seconds = 4; // Number of seconds to take samples
    
    printf("Calibrating accelerometer and gyroscope. Leave robot car horizontal...\n");
@@ -723,26 +739,26 @@ rw_error:
    Non constant global variables accessed: err_MA, scale_MA, mRes. They must have correct values prior to call.
    The variables err_MA and scale_MA are modified to reflect the new fit.
 */
-static double ellipsoid_fit(SampleList_t *sample_list)
+static double ellipsoid_fit(const SampleList_t *const sample_list)
 {
 int iter, num_excess_err; 
 double Vx, Vy, Vz;
 double dVx, dVy, dVz;
 double A, B, C;
 double dA, dB, dC; 
-double Bm, err, init_err, min_err, step; 
+double err, init_err, min_err, step; 
 double min_found[7];  // err, Vx, Vy, Vx, A, B, C 
 const double delta = 0.001;
    
-   Bm = lround(magneticField/mRes);  // Value of magnetic field in IMU units
-   /* Set initial point */
+   const double Bm = lround(magneticField/mRes);  // Value of magnetic field in IMU units
+   /* Set initial point from global variables */
    Vx = (double)err_MA[0]; Vy = (double)err_MA[1]; Vz = (double)err_MA[2];
    A = scale_MA[0]; B = scale_MA[1]; C = scale_MA[2];  
    
    /* Iterate a maximum of 50 times to find a minimum in the error function */
    for (iter=0; iter<50;iter++) {
       /* Compute error of current point */
-      err = compute_error(Vx, Vy, Vz, A, B, C, Bm, sample_list);
+      err = quad_error_function(Vx, Vy, Vz, A, B, C, Bm, sample_list);
       if (iter==0) init_err = err;  // Store error of initial point
       /* Check if we found a minimum */
       if (iter==0 || err<min_err) {
@@ -754,13 +770,13 @@ const double delta = 0.001;
       /* If a minimum was not found, check that we do not exceed 8 iterations with no new minimum found */
       if (err>min_err && ++num_excess_err==8) break;  
       
-      /* Calculate gradient of error function */
-      dA = (compute_error(Vx, Vy, Vz, A+delta, B, C, Bm, sample_list)-err)/delta;
-      dB = (compute_error(Vx, Vy, Vz, A, B+delta, C, Bm, sample_list)-err)/delta;
-      dC = (compute_error(Vx, Vy, Vz, A, B, C+delta, Bm, sample_list)-err)/delta;
-      dVx = (compute_error(Vx+delta, Vy, Vz, A, B, C, Bm, sample_list)-err)/delta;
-      dVy = (compute_error(Vx, Vy+delta, Vz, A, B, C, Bm, sample_list)-err)/delta;
-      dVz = (compute_error(Vx, Vy, Vz+delta, A, B, C, Bm, sample_list)-err)/delta;
+      /* Calculate gradient of error function, using finite difference approximation */
+      dA = (quad_error_function(Vx, Vy, Vz, A+delta, B, C, Bm, sample_list)-quad_error_function(Vx, Vy, Vz, A-delta, B, C, Bm, sample_list))/(2*delta);
+      dB = (quad_error_function(Vx, Vy, Vz, A, B+delta, C, Bm, sample_list)-quad_error_function(Vx, Vy, Vz, A, B-delta, C, Bm, sample_list))/(2*delta);
+      dC = (quad_error_function(Vx, Vy, Vz, A, B, C+delta, Bm, sample_list)-quad_error_function(Vx, Vy, Vz, A, B, C-delta, Bm, sample_list))/(2*delta);
+      dVx = (quad_error_function(Vx+delta, Vy, Vz, A, B, C, Bm, sample_list)-quad_error_function(Vx-delta, Vy, Vz, A, B, C, Bm, sample_list))/(2*delta);
+      dVy = (quad_error_function(Vx, Vy+delta, Vz, A, B, C, Bm, sample_list)-quad_error_function(Vx, Vy-delta, Vz, A, B, C, Bm, sample_list))/(2*delta);
+      dVz = (quad_error_function(Vx, Vy, Vz+delta, A, B, C, Bm, sample_list)-quad_error_function(Vx, Vy, Vz-delta, A, B, C, Bm, sample_list))/(2*delta);
       
       /* Calculate new point in direction of negative gradient, separately for each 3 dimension space */
       step = 1.0/(2+iter);  // we use 1.0 instead of 2.0 (as is usual eg in Frank–Wolfe algorithm) to get smaller steps
@@ -778,8 +794,8 @@ const double delta = 0.001;
    if (min_err < init_err) {  // if error of new point is less than initial error, eureka
       err_MA[0] = lrint(min_found[1]); err_MA[1] = lrint(min_found[2]); err_MA[2] = lrint(min_found[3]);
       scale_MA[0] = sqrt(min_found[4]); scale_MA[1] = sqrt(min_found[5]); scale_MA[2] = sqrt(min_found[6]); 
-      printf("Vx:%f Vy:%f Vz:%f\n", min_found[1],min_found[2], min_found[3]);
-      printf("A:%f B:%f C:%f\n", min_found[4],min_found[5], min_found[6]);
+      printf("Vx:%.1f Vy:%.1f Vz:%.1f\n", min_found[1],min_found[2], min_found[3]);
+      printf("A:%.2f B:%.2f C:%.2f\n", min_found[4],min_found[5], min_found[6]);
       printf("Minimum found, initial error=%f, final error=%f\n", init_err, min_found[0]);
    }
    return min_err/sample_list->num_elems;  // Mean cuadratic error
@@ -787,17 +803,15 @@ const double delta = 0.001;
 
 
 /*
-Compute the total error of the ellipsoid fit given by the parameters Vx, Vy, Vz (the displacement, or hardiron)
-and A, B C (the axis coefficients, or softiron). It uses the given magnetometer samples in the 
-variables xvalues, yvalues and zvalues. num_samples is the size of the arrays.
+Compute the total quadratic error of the ellipsoid fit given by the parameters Vx, Vy, Vz (the displacement, or hardiron)
+and A, B C (the axis coefficients, or softiron). It uses the given magnetometer samples in the sample_list.
 Bm is the local magnetic field strength (in IMU scale, between -32768 and 32767).
 The error is the sum of the cuadratic errors of each sample with the given fit.
 The ellipsoid equation is A(Bx-Vx)^2+B(By-Vy)^2+C(Bz-Vz)^2 - Bm^2 = 0, so the 
 error of each sample measures how far from zero is each sample, squared.
-
 */
-static double compute_error(double Vx, double Vy, double Vz, double A, double B, double C, 
-                            double Bm, SampleList_t *sample_list)
+static double quad_error_function(double Vx, double Vy, double Vz, double A, double B, double C, 
+                            double Bm, const SampleList_t *const sample_list)
 {
 double cuad_err_total=0.0, err, ex, ey, ez;
 int i;   
@@ -823,8 +837,7 @@ The magnetomer data is read. If data was available, the function goes on to read
 of the accelerometer/gyroscope, which has a much higher ODR (this is why the FIFO is used, 
 to store data without having to poll so often).
 For each value of the accel/gyro, the fusion filter and the 3D compensated compass are called, using
-the same previously read magnetometer data. It works OK, although the sampling rates are different.
-Better solution (but seems unnecessary) would be to oversample the magnetometer data.
+interpolated magnetometer data, so both sample rates are the same. 
 
 It takes about 5 ms to complete (mostly between 4.5 and 5.5 ms) for ODR_M=40 Hz, ODR_AGG=238 Hz.
 */
@@ -834,7 +847,8 @@ int n, rc, samples;
 char *p, str[17], buf[12*32+1], commands[] = {0x07, 0x01, 0x18, 0x01, 0x06, 0x00, 0x00, 0x00};
 uint32_t start_tick, mtick;
 static uint32_t old_mtick;
-static unsigned int samples_count, count;
+static unsigned int samples_count, count, collision_sample;
+static bool in_collision;
 static double v_m, e_m;
 
 /* These values are the RAW signed 16-bit readings from the sensors */
@@ -848,9 +862,7 @@ double gxr, gyr, gzr;
 double mxr, myr, mzr; 
 double axrf, ayrf, azrf; // values after LPF
 double mxrf, myrf, mzrf; // values after LPF
-static double axr_previous;
-double dax;
-
+double daxr;
 
    start_tick = gpioTick(); 
 
@@ -960,8 +972,19 @@ double dax;
       v_m += 9.81*axrf * deltat;
       e_m += v_m*deltat;
       //printf("a=%f, v=%f, e=%f\n", 9.81*axr, v_m, e_m);
-      dax = axr - axr_previous;
-      if (fabs(dax) > 0.5) printf("Collision detected!\n");
+      LPFilter_put(&filter_d1_ax, axr);
+      daxr = odr_ag_modes[ODR_AG] * LPFilter_get(&filter_d1_ax);  // Calculate 1st derivative of axr, in g/s
+
+      if (!in_collision && fabs(daxr) > 100) {
+         collision_sample = samples_count;
+         in_collision = true;   
+         atomic_store_explicit(&collision, true, memory_order_release);
+      }
+      
+      if (in_collision && (samples_count - collision_sample)/odr_ag_modes[ODR_AG] > 0.1) {
+         in_collision = false;
+         atomic_store_explicit(&collision, false, memory_order_release);
+      }
       
       /*
       snprintf(str, sizeof(str), "AX:% 7.1f mg", axr*1000);  
@@ -990,7 +1013,6 @@ double dax;
       // Kalman extended filter
       //EKFUpdateStatus(gxr*M_PI/180, gyr*M_PI/180, gzr*M_PI/180, axrf, ayrf, azrf, deltat);
       //EKFUpdateStatus(0.01, 0.01, 0.01, 0.01, 0.01, 1.01, deltat);
-      axr_previous = axr;
    }
    
    snprintf(str, sizeof(str), "Yaw:  %- 6.1f", yaw);  
@@ -1194,22 +1216,26 @@ uint8_t byte;
    /************************* Final actions ***********************/   
    // Initialize low pass filter for interpolating magnetometer data
    rc = LPFilter_init(&filter_mx, LP_20_240_filter_taps, sizeof(LP_20_240_filter_taps)/sizeof(double));
-   if (rc < 0) goto rw_error;  
+   if (rc < 0) goto init_error;  
    LPFilter_init(&filter_my, LP_20_240_filter_taps, sizeof(LP_20_240_filter_taps)/sizeof(double));
-   if (rc < 0) goto rw_error;    
+   if (rc < 0) goto init_error;    
    LPFilter_init(&filter_mz, LP_20_240_filter_taps, sizeof(LP_20_240_filter_taps)/sizeof(double));
-   if (rc < 0) goto rw_error; 
+   if (rc < 0) goto init_error; 
    // Set gain to upsampling_factor, to compensate for DC gain reduction due to interpolation
-   LPFilter_DCgain(&filter_mx, upsampling_factor);  // No need for filter_my and filter_mz, as they share the LP_20_240_filter_taps
+   LPFilter_setDCgain(&filter_mx, upsampling_factor);  // No need for filter_my and filter_mz, as they share the LP_20_240_filter_taps
    
    // Initialize low pass filter for accelerometer data
    rc = LPFilter_init(&filter_ax, LP_10_240_filter_taps, sizeof(LP_10_240_filter_taps)/sizeof(double));
-   if (rc < 0) goto rw_error;  
+   if (rc < 0) goto init_error;  
    LPFilter_init(&filter_ay, LP_10_240_filter_taps, sizeof(LP_10_240_filter_taps)/sizeof(double));
-   if (rc < 0) goto rw_error;    
+   if (rc < 0) goto init_error;    
    LPFilter_init(&filter_az, LP_10_240_filter_taps, sizeof(LP_10_240_filter_taps)/sizeof(double));
-   if (rc < 0) goto rw_error; 
-   LPFilter_DCgain(&filter_ax, 1.0);  // No need for filter_ay and filter_az, as they share the LP_10_240_filter_taps  
+   if (rc < 0) goto init_error; 
+   LPFilter_setDCgain(&filter_ax, 1.0);  // No need for filter_ay and filter_az, as they share the LP_10_240_filter_taps  
+
+   // Initialize high pass filter for 1st order derivation
+   rc = LPFilter_init(&filter_d1_ax, HP_1st_deriv_filter_taps, sizeof(HP_1st_deriv_filter_taps)/sizeof(double));
+   if (rc < 0) goto init_error;    
    
    
    // Start the IMU reading thread
@@ -1226,6 +1252,11 @@ uint8_t byte;
 rw_error:
    closeLSM9DS1();
    ERR(-1, "Cannot read/write data from IMU");
+
+   /* error handling if initialization failed */   
+init_error:
+   closeLSM9DS1();
+   ERR(-1, "Error initializing the IMU");
 }
 
 
@@ -1245,6 +1276,7 @@ void closeLSM9DS1(void)
    }
    LPFilter_close(&filter_mx); LPFilter_close(&filter_my); LPFilter_close(&filter_mz);
    LPFilter_close(&filter_ax); LPFilter_close(&filter_ay); LPFilter_close(&filter_az);
+   LPFilter_close(&filter_d1_ax);
    i2c_accel_handle = -1;
    i2c_mag_handle = -1;
 }

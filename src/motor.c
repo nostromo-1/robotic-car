@@ -80,7 +80,7 @@ extern int optind, opterr, optopt;
 /****************** Variables y tipos globales **************************/
 
 typedef enum {ADELANTE, ATRAS} Sentido_t;
-typedef enum {CW, ACW} Rotation_t;
+typedef enum {CW, CCW} Rotation_t;
 
 typedef struct {
     const unsigned int en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
@@ -122,6 +122,7 @@ _Atomic uint32_t distance = UINT32_MAX;
 _Atomic int velocidadCoche = INITIAL_SPEED;  // velocidad objetivo del coche. Entre 0 y 100; el sentido de la marcha viene dado por el botón pulsado (A/B)
 _Atomic bool esquivando; // Car is avoiding obstacle
 _Atomic bool stalled;    // Car is stalled: it does not change its distance to objects
+_Atomic bool collision;  // Car has crashed, when moving forwards or backwards
 _Atomic bool scanningWiimote;  // User pressed scan button and car is scanning for wiimotes
 _Atomic bool playing_audio, cancel_audio;   // Variables compartidas con fichero sound.c
 
@@ -169,7 +170,6 @@ Motor_t m_dcho = {
 /* Forward declarations of internal functions of this module */
 void speedControl(void);  /* Callback called periodically to make motors rotate at same RPM */
 void ajustaCocheConMando(void); /* Read wiimote buttons and adjust speed accordingly */
-void rota(Rotation_t rotation, Sentido_t marcha);  /* Rotate car on the spot */
 
 
 /* Callbacks called when some GPIO pin changes */
@@ -207,6 +207,7 @@ void fastStopMotor(Motor_t *motor)
 }
 
 
+
 /* v va de 0 a 100 */
 void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
 {    
@@ -223,40 +224,6 @@ void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
     gpioPWM(motor->en_pin, motor->PWMduty);
     motor->speedsetTick = gpioTick();
     pthread_mutex_unlock(&motor->mutex);   
-}
-
-
-
-/* Rota el coche a la derecha (dextrógiro, sentido==CW) o a la izquierda (levógiro, sentido==ACW) */
-void rota(Rotation_t rotation, Sentido_t marcha)  
-{
-Motor_t *pivot, *non_pivot;
-
-   switch (marcha) {
-      case ADELANTE: if (rotation==CW) {
-                        pivot = &m_dcho;
-                        non_pivot = &m_izdo;
-                     }
-                     else {
-                        pivot = &m_izdo;
-                        non_pivot = &m_dcho;
-                     }
-                     break;
-      case ATRAS: if (rotation==CW) {
-                        pivot = &m_izdo;
-                        non_pivot = &m_dcho;
-                  }
-                  else {
-                     pivot = &m_dcho;
-                     non_pivot = &m_izdo;
-                  }
-                  break;
-      default: fprintf(stderr, "%s: Bad Sentido_t parameter: %d\n", __func__, marcha);
-               return;
-   }
-
-   ajustaMotor(pivot, softTurn?0:velocidadCoche, 1-marcha);
-   ajustaMotor(non_pivot, velocidadCoche, marcha);
 }
 
 
@@ -311,15 +278,16 @@ void sonarTrigger(void)
    It sets global variable "esquivando", main loop also sets this variable  */
 void sonarEcho(int gpio, int level, uint32_t tick)
 {
-   static uint32_t startTick, referenceTick, distance_array[NUMPOS], pos_array;
-   static uint32_t previous_distance, reference_distance;
-   static int firstTime;
-   static bool false_echo;
-   static const int maxStalledTime = 1200*1e3;  // Time in microseconds to flag car as stopped (it does not change its distance)
-   static const char displayText[] = "Dist (cm):";
-   uint32_t suma, distance_local;
-   char str[6];
-   int i, diffTick, stalledTime=0;
+static uint32_t startTick, referenceTick, distance_array[NUMPOS], pos_array;
+static uint32_t previous_distance, reference_distance;
+static int firstTime;
+static bool false_echo;
+static const int maxStalledTime = 1200*1e3;  // Time in microseconds to flag car as stopped (it does not change its distance)
+static const char displayText[] = "Dist (cm):";
+uint32_t suma, distance_local;
+char str[6];
+int i, diffTick, stalledTime=0;
+bool in_collision, is_stalled;
   
    switch (level) {
    case PI_ON:
@@ -333,9 +301,8 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            if (false_echo) return;  // Not break
            diffTick = tick - startTick;  // pulse length in microseconds
            if (diffTick > 23000 || diffTick < 60) break;  /* out of range */
-           distance_local = (diffTick*17)/1000;  // distance in cm
 
-           distance_array[pos_array++] = distance_local;
+           distance_array[pos_array++] = (diffTick*17)/1000;  // sonar measured distance in cm
            if (pos_array == NUMPOS) pos_array = 0;
  
            if (firstTime>=0) {
@@ -345,7 +312,7 @@ void sonarEcho(int gpio, int level, uint32_t tick)
               } else {
                  firstTime = -1;  /* Initialisation of distance_array is over */
                  referenceTick = tick;  // Reference for stalled time calculation
-                 oledWriteString(0, 0, displayText, false);  // Write fixed text to display once
+                 oledWriteString(0, 0, displayText, false);  // Write fixed text to display only once
               }
            }
            
@@ -353,9 +320,9 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            for (i=0, suma=0; i<NUMPOS; i++) suma += distance_array[i]; 
            sonarHCSR04.distance = suma/NUMPOS;   
            
-           /* Set global variable "distance" and activate main loop if below threshold */
+           /* Set global variable "distance", this is the only producer */
            atomic_store_explicit(&distance, sonarHCSR04.distance, memory_order_release);
-           distance_local = atomic_load_explicit(&distance, memory_order_relaxed);  // local copy of variable
+           distance_local = sonarHCSR04.distance; // local copy of variable
            if (referenceTick == tick) reference_distance = distance_local;  // Will only happen once, at the beginning
            
            /* Update display if distance changed since last reading */
@@ -367,8 +334,7 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            
            /* If car should be moving, look at change in distance to object since reference was taken; 
               if distance change is small, compute time passed as stalled, otherwise, reset values */
-           if ((m_izdo.velocidad || m_dcho.velocidad) &&
-               abs(reference_distance - distance_local)<=2) stalledTime = tick - referenceTick;
+           if ((m_izdo.velocidad || m_dcho.velocidad) && abs(reference_distance - distance_local)<=2) stalledTime = tick - referenceTick;
            else {
                stalledTime = 0;
                referenceTick = tick;
@@ -376,15 +342,17 @@ void sonarEcho(int gpio, int level, uint32_t tick)
            }
            
            /* If the stalled time is above threshold, set global variable "stalled" as true, otherwise as false */
-           atomic_store_explicit(&stalled, stalledTime >= maxStalledTime, memory_order_release); 
+           is_stalled = stalledTime >= maxStalledTime;
+           atomic_store_explicit(&stalled, is_stalled, memory_order_release); 
            
            /* Activate semaphore to indicate main loop that it must awake;
-              check specific situations first, and then activate it if one of two conditions is met:
+              check specific situations first, and then activate semaphore if one of two conditions is met:
               either the distance to obstacle is below threshold or the car is stalled (below or over threshold)*/
            if (!remoteOnly && !esquivando && !scanningWiimote) {
-               if (distance_local < DISTMIN || stalled) {
+               in_collision = atomic_load_explicit(&collision, memory_order_acquire);
+               if (distance_local < DISTMIN || is_stalled || in_collision) {
                   atomic_store_explicit(&esquivando, true, memory_order_release);  // Set global variable
-                  i = sem_post(&semaphore); 
+                  i = sem_post(&semaphore); // Awake main loop
                   if (i) perror("Error when activating semaphore");
                }
            }
@@ -443,7 +411,7 @@ static void desactivaPito(void)
 /*  Función interna auxiliar */
 static void* duerme_pitando(void *arg)
 {
-    uint32_t decimas, s, m;
+uint32_t decimas, s, m;
     
     decimas = *(uint32_t*)arg;
     s = decimas/10;
@@ -461,8 +429,8 @@ modo=0; pita en otro hilo; vuelve inmediatamente
 modo=1; pita en este hilo, vuelve después de haber pitado */
 void pito(uint32_t decimas, int modo)
 {
-    pthread_t pth;
-    uint32_t *pd;
+pthread_t pth;
+uint32_t *pd;
         
     if (decimas == 0) return;
     pd = malloc(sizeof(uint32_t));
@@ -488,7 +456,7 @@ modo=0; vuelve inmediatamente, sin esperar el final
 modo=1; vuelve después de haber reproducido el fichero de audio */
 void audioplay(char *file, int modo)
 {
-    pthread_t pth;
+pthread_t pth;
     
     /* Si ya estamos reproduciendo algo, manda señal de cancelación al thread de audio */
     if (playing_audio) {
@@ -516,12 +484,12 @@ void wiiErr(cwiid_wiimote_t *wiimote, const char *s, va_list ap)
 /*** wiimote event loop ***/
 static void wiiCallback(cwiid_wiimote_t *wiimote, int mesg_count, union cwiid_mesg mesg[], struct timespec *t)
 {
-    int i;
-    static uint16_t previous_buttons;
-    unsigned int bateria;
-    static int LEDs[4] = { CWIID_LED1_ON,  CWIID_LED1_ON | CWIID_LED2_ON,
-                CWIID_LED1_ON | CWIID_LED2_ON | CWIID_LED3_ON,
-                CWIID_LED1_ON | CWIID_LED2_ON | CWIID_LED3_ON | CWIID_LED4_ON };        
+int i;
+static uint16_t previous_buttons;
+unsigned int bateria;
+static int LEDs[4] = { CWIID_LED1_ON,  CWIID_LED1_ON | CWIID_LED2_ON,
+                       CWIID_LED1_ON | CWIID_LED2_ON | CWIID_LED3_ON,
+                       CWIID_LED1_ON | CWIID_LED2_ON | CWIID_LED3_ON | CWIID_LED4_ON };        
 
      for (i = 0; i < mesg_count; i++) {
         switch (mesg[i].type) {
@@ -811,7 +779,7 @@ static FILE *fp;
     if (current_tick - m_dcho.speedsetTick < minMotorSetupTime) return;
     
     pv = lpulses - rpulses;
-    if (pv<=8 && pv >=-8) return;  // Tolerable error, do not enter control section
+    if (abs(pv) <= 8) return;  // Tolerable error, do not enter control section
     
     /** Control section loop; adjust parameters **/
     //printf("\tAdjust left: %i, right: %i\n", -(kp*pv)/10, (kp*pv)/10);
@@ -833,21 +801,81 @@ static FILE *fp;
 
 /****************** Funciones auxiliares varias **************************/
 
+static int interruptibleWait(int duration)
+{
+int rest, lapse;
+uint32_t startTick;
+const int chunk = 10000;  // 10 ms chunks
+bool in_collision;   
+   
+   startTick = gpioTick();
+
+   while(rest = duration - (gpioTick() - startTick), rest>0) {
+      lapse = (rest>chunk)?chunk:rest;
+      gpioDelay(lapse);
+      in_collision = atomic_load_explicit(&collision, memory_order_acquire);
+      if (in_collision) return -1;
+   }
+
+   return 0;
+}
+
+
+
+
+/*
+Rota el coche a la derecha (dextrógiro, rotation==CW) o a la izquierda (levógiro, rotation==CCW). 
+Rota durante 'duration' microseconds
+*/
+static int rota(Rotation_t rotation, Sentido_t marcha, int duration)  
+{
+Motor_t *pivot, *non_pivot;
+
+   switch (marcha) {
+      case ADELANTE: if (rotation == CW) {
+                        pivot = &m_dcho;
+                        non_pivot = &m_izdo;
+                     }
+                     else {
+                        pivot = &m_izdo;
+                        non_pivot = &m_dcho;
+                     }
+                     break;
+      case ATRAS: if (rotation == CW) {
+                        pivot = &m_izdo;
+                        non_pivot = &m_dcho;
+                  }
+                  else {
+                     pivot = &m_dcho;
+                     non_pivot = &m_izdo;
+                  }
+                  break;
+   }
+
+   ajustaMotor(pivot, softTurn?0:velocidadCoche, 1-marcha);
+   ajustaMotor(non_pivot, velocidadCoche, marcha);
+   return interruptibleWait(duration);
+}
+
+
+
 /**
 The car has found an obstacle in front, move backwards and turn slightly 
 **/
-void retreatBackwards(void)
+static int retreatBackwards(void)
 {
-   //printf("Car seems stalled, move a bit backwards...\n");
+int rc;
+
+   //printf("Car seems stalled or collisioned, move a bit backwards...\n");
    fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);
    gpioSleep(PI_TIME_RELATIVE, 0, 200000);
    ajustaMotor(&m_izdo, 50, ATRAS);
-   ajustaMotor(&m_dcho, 50, ATRAS);  
-   gpioSleep(PI_TIME_RELATIVE, 0, softTurn?400000:800000); // Move a little backwards first
-          
-   rota(CW, ATRAS);  // And now rotate backwards
-   gpioSleep(PI_TIME_RELATIVE, 0, velocidadCoche>70?300000:600000);  
-   fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);   
+   ajustaMotor(&m_dcho, 50, ATRAS);
+   rc = interruptibleWait(softTurn?400000:800000);  // Move a little backwards first
+   if (rc >= 0) rc = rota(CW, ATRAS, velocidadCoche>70?300000:600000);  // If all went well, rotate backwards
+
+   fastStopMotor(&m_izdo); fastStopMotor(&m_dcho); 
+   return rc;
 }
 
 
@@ -858,22 +886,24 @@ and only returns if it was avoided or the user stopped pressing A.
 The variable "esquivando" will be true when called, main loop will wait for this
 routine to finish. So it has the only control of the car.
 **/
-void avoidObstacle(void)
-{  
+static void avoidObstacle(void)
+{
+int rc;
+   
    //printf("Obstacle at %d cm, avoiding...\n", distance);
    /** Loop for obstacle avoidance **/
-   while (distance < DISTMIN) {  // distance is atomic, and is set asynchronously in another thread as a Release sequence
+   // distance is atomic, and is set asynchronously in another thread
+   while (atomic_load_explicit(&distance, memory_order_acquire) < DISTMIN) {  
       /** Check that the button to scan the wiimote was not pressed **/
       if (scanningWiimote) break;
       /** Check that the user keeps pressing A **/
       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) break;
 
-      /**  Rotate the car to avoid obstacle **/
-      if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rota(ACW, ADELANTE);  // con LEFT pulsado, esquiva a la izquierda
-      else rota(CW, ADELANTE);  // en caso contrario a la derecha
-      gpioSleep(PI_TIME_RELATIVE, 0, SONARDELAY*1000);  // Rotate for the time to get a new distance measure
-
-      if (stalled) retreatBackwards();  // stalled is a global variable, set by the sonar asynchronously
+      /**  Rotate the car to avoid obstacle; Rotate for the time to get a new distance measure **/
+      if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rc = rota(CCW, ADELANTE, SONARDELAY*1000);  // con LEFT pulsado, esquiva a la izquierda
+      else rc = rota(CW, ADELANTE, SONARDELAY*1000);  // en caso contrario a la derecha
+      
+      if (rc < 0 || atomic_load_explicit(&stalled, memory_order_acquire)) rc = retreatBackwards();  // stalled is a global variable, set by the sonar asynchronously
    }
 }
 
@@ -882,7 +912,7 @@ void avoidObstacle(void)
 
 /* Thread in charge of sending a clock pulse to the circuit implementing the KARR scan effect.
 At each LH transition, the led will change */
-void karrScan(void)
+static void karrScan(void)
 {  
    gpioWrite(KARR_PIN, PI_ON); 
    gpioSleep(PI_TIME_RELATIVE, 0, 100);  // set high state for clock during 100 us 
@@ -892,7 +922,7 @@ void karrScan(void)
 
 
 /* Activa el efecto scanner de los leds delanteros, como KARR */
-void setupKarr(void)
+static void setupKarr(void)
 {    
    gpioSetMode(KARR_PIN, PI_OUTPUT);
    gpioWrite(KARR_PIN, PI_OFF); 
@@ -900,7 +930,7 @@ void setupKarr(void)
 }
 
 
-void closeKarr(void)
+static void closeKarr(void)
 {
    gpioSetTimerFunc(TIMER5, KARRDELAY, NULL); 
 }
@@ -941,7 +971,7 @@ void terminate(int signum)
 
 int setup(void)
 {
-int r = 0;
+int rc = 0;
    
    // Initialise pigpio library
    if (gpioCfgClock(5, PI_CLOCK_PCM, 0)<0) return 1;   /* Standard settings: Sample rate: 5 us, PCM clock */
@@ -969,15 +999,15 @@ int r = 0;
    gpioSetMode(bocina.pin, PI_OUTPUT);
    gpioWrite(bocina.pin, PI_OFF);
    
-   if (checkBattery) r |= setupPCF8591(PCF8591_I2C, TIMER1);  // Check battery voltage, timer#1
+   if (checkBattery) rc |= setupPCF8591(PCF8591_I2C, TIMER1);  // Check battery voltage, timer#1
 
    gpioSetMode(WMSCAN_PIN, PI_INPUT);
    gpioSetPullUpDown(WMSCAN_PIN, PI_PUD_UP);  // pull-up resistor; button pressed == OFF
    gpioGlitchFilter(WMSCAN_PIN, 100000);      // 0,1 sec filter
    
-   r |= setupMotor(&m_izdo);
-   r |= setupMotor(&m_dcho);
-   r |= sem_init(&semaphore, 0, 0);
+   rc |= setupMotor(&m_izdo);
+   rc |= setupMotor(&m_dcho);
+   rc |= sem_init(&semaphore, 0, 0);
    
    setupBMP280(BMP280_I2C, TIMER4);  // Setup temperature/pressure sensor
    setupLSM9DS1(LSM9DS1_GYR_ACEL_I2C, LSM9DS1_MAG_I2C, calibrateIMU, TIMER3);   // Setup IMU
@@ -988,21 +1018,23 @@ int r = 0;
    setupKarr();  // start KARR scanner effect
    oledSetInversion(false); // clear display
    
-   r |= setupSonarHCSR04();  // last to call, as it starts measuring distance and triggering semaphore
+   rc |= setupSonarHCSR04();  // last to call, as it starts measuring distance and triggering semaphore
 
-   return r;
+   return rc;
 }
 
 
 /****************** Main **************************/
 void main(int argc, char *argv[])
 {
-int r;
+int rc;
 double volts;
+bool is_stalled, in_collision;
+uint32_t distance_value;
 
    opterr = 0;  // Prevent getopt from outputting error messages
-   while ((r = getopt(argc, argv, "crbesf:")) != -1)
-       switch (r) {
+   while ((rc = getopt(argc, argv, "crbesf:")) != -1)
+       switch (rc) {
            case 'r':  /* Remote only mode: only reacts to remote control */
                remoteOnly = true;
                break;
@@ -1026,10 +1058,10 @@ double volts;
                exit(1);
    }
    
-   r = setup();
-   if (r) {
+   rc = setup();
+   if (rc) {
        fprintf(stderr, "Error al inicializar. Coche no arranca!\n");
-       if (r < 0) terminate(SIGINT);   // Si el error estaba al inicializar pigpio (r>0), no llames a terminate
+       if (rc < 0) terminate(SIGINT);   // Si el error estaba al inicializar pigpio (rc>0), no llames a terminate
        else exit(1);
    }
   
@@ -1062,23 +1094,26 @@ double volts;
          ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);             
        }
          
-       /* Sleep until semaphore awakens us; it will happen in two cases:
-          either the distance to an obstacle is below the threshold or the car is stalled */
-       r = sem_wait(&semaphore);  
-       if (r) {
+       /* Sleep until semaphore awakens us; it will happen in 3 cases:
+          either the distance to an obstacle is below the threshold, or the car is stalled, or there was a collision */
+       rc = sem_wait(&semaphore);  
+       if (rc) {
          perror("Error waiting for semaphore");
          continue;
        }
              
        if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Take action only if A is pressed
+       distance_value = atomic_load_explicit(&distance, memory_order_acquire); 
+       in_collision = atomic_load_explicit(&collision, memory_order_acquire);   
+       is_stalled = atomic_load_explicit(&stalled, memory_order_acquire);   
      
-       oledBigMessage(0, "OBSTACLE");               
+       oledBigMessage(0, "OBSTACLE"); 
+       if (in_collision || is_stalled) {
+          printf("Collision!\n");
+          retreatBackwards(); 
+       }
+       else if (distance_value < DISTMIN) avoidObstacle();  // Distance is below threshold       
 
-       /* distance is atomic, and was set in another thread as a Release sequence: 
-          single producer - multiple consumers, so there is no need for an acquire atomic operation */
-       if (distance < DISTMIN) avoidObstacle();  // Distance is below threshold, stalled or not
-       else retreatBackwards(); // Stalled but distance is over threshold; probably an undetected obstacle
-       
        /* Obstacle is avoided, go back to normality */
        oledBigMessage(0, NULL);
    }
