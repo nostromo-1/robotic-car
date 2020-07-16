@@ -18,9 +18,8 @@ Communication with the robot is achieved via bluetooth (the wiimote) and wifi (s
   * Activate a buzzer sound (DOWN button)
   * Play a police siren (UP button) over a loudspeaker. If you push again the UP button while still playing, it stops playing
   * Increase (button ´1´ + button '+') or decrease (button '1' + button '-') volume of sound
-* It continuously monitors distance to an obstacle in the front side. If it is close to an obstacle, it tries to avoid it.
 * It can detect collisions via the inertial measurement unit. If it crashes, it tries to avoid the obstacle.
-* If an obstacle is near, it will drive around it by turning until no obstacle is found. If it detects a stall (like in undetected obstacles, due to a non straight position with respect to the sonar), it will move a little backwards and turn to avoid it
+* It continuously monitors distance to an obstacle in the front side. If an obstacle is near, it will drive around it by turning until no obstacle is found. If it detects a stall (like in undetected obstacles, due to a non straight position with respect to the sonar), it will move a little backwards and turn to avoid it
 * It monitors battery voltage and current consumption and shows them in the display, also showing a battery status symbol in the display. If battery is too low, it powers off the raspberry
 * If the scan button is pressed, it starts scanning for wiimotes and connects to one. A long press powers off the raspberry
 * If a pi-camera is attached, it can be used to display the image in a web browser (using https://github.com/silvanmelchior/RPi_Cam_Web_Interface)
