@@ -76,6 +76,8 @@ extern int optind, opterr, optopt;
 #define LSM9DS1_MAG_I2C 0x1E       /* Dirección i2c del módulo magnetómetro del IMU LSM9DS1 */
 
 
+#define READ_ATOMIC(var) atomic_load_explicit(&var, memory_order_acquire)
+#define WRITE_ATOMIC(var,value) atomic_store_explicit(&var, value, memory_order_release)
 
 /****************** Variables y tipos globales **************************/
 
@@ -83,6 +85,7 @@ typedef enum {ADELANTE, ATRAS} Sentido_t;
 typedef enum {CW, CCW} Rotation_t;
 
 typedef struct {
+    const char *id;  /* left or right */
     const unsigned int en_pin, in1_pin, in2_pin, sensor_pin;  /* Pines  BCM */
     Sentido_t sentido;   /* ADELANTE, ATRAS */
     int velocidad;       /* 0 a 100, velocidad (no real) objetivo impuesta al motor */
@@ -150,6 +153,7 @@ SonarHCSR04_t sonarHCSR04 = {
 };
 
 Motor_t m_izdo = {
+    .id = "left",
     .en_pin = MI_ENA_PIN,
     .in1_pin = MI_IN1_PIN,
     .in2_pin = MI_IN2_PIN,
@@ -158,6 +162,7 @@ Motor_t m_izdo = {
 };
 
 Motor_t m_dcho = {
+    .id = "right",
     .en_pin = MD_ENA_PIN,
     .in1_pin = MD_IN1_PIN,
     .in2_pin = MD_IN2_PIN,
@@ -169,7 +174,7 @@ Motor_t m_dcho = {
 
 /* Forward declarations of internal functions of this module */
 void speedControl(void);  /* Callback called periodically to make motors rotate at same RPM */
-void ajustaCocheConMando(void); /* Read wiimote buttons and adjust speed accordingly */
+void ajustaCocheConMando(uint16_t buttons); /* Adjust speed accordingly to the pressed wiimote buttons, as passed in the parameter */
 
 
 /* Callbacks called when some GPIO pin changes */
@@ -211,6 +216,7 @@ void fastStopMotor(Motor_t *motor)
 /* v va de 0 a 100 */
 void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
 {    
+///printf("Set %s motor %d\n", motor->id, (sentido==ADELANTE)?v:-v);
     if (v > 100) v = 100;
     if (v < 0) {
         fprintf(stderr, "Error en ajustaMotor: v<0!\n");
@@ -251,7 +257,7 @@ int setupMotor(Motor_t *motor)
 
 void closeMotor(Motor_t *motor)
 {
-   printf("Closing motor...\n");
+   printf("Closing %s motor...\n", motor->id);
    if (useEncoder) {
       gpioSetAlertFunc(motor->sensor_pin, NULL); 
       gpioSetTimerFunc(TIMER2, 100, NULL);
@@ -321,7 +327,7 @@ bool in_collision, is_stalled;
            sonarHCSR04.distance = suma/NUMPOS;   
            
            /* Set global variable "distance", this is the only producer */
-           atomic_store_explicit(&distance, sonarHCSR04.distance, memory_order_release);
+           WRITE_ATOMIC(distance, sonarHCSR04.distance);
            distance_local = sonarHCSR04.distance; // local copy of variable
            if (referenceTick == tick) reference_distance = distance_local;  // Will only happen once, at the beginning
            
@@ -342,16 +348,16 @@ bool in_collision, is_stalled;
            }
            
            /* If the stalled time is above threshold, set global variable "stalled" as true, otherwise as false */
-           is_stalled = stalledTime >= maxStalledTime;
-           atomic_store_explicit(&stalled, is_stalled, memory_order_release); 
+           is_stalled = false; ////stalledTime >= maxStalledTime;
+           WRITE_ATOMIC(stalled, is_stalled); 
            
            /* Activate semaphore to indicate main loop that it must awake;
               check specific situations first, and then activate semaphore if one of two conditions is met:
               either the distance to obstacle is below threshold or the car is stalled (below or over threshold)*/
-           if (!remoteOnly && !esquivando && !scanningWiimote) {
-               in_collision = atomic_load_explicit(&collision, memory_order_acquire);
+           if (!remoteOnly && !scanningWiimote && !READ_ATOMIC(esquivando)) {
+               in_collision = READ_ATOMIC(collision);
                if (distance_local < DISTMIN || is_stalled || in_collision) {
-                  atomic_store_explicit(&esquivando, true, memory_order_release);  // Set global variable
+                  WRITE_ATOMIC(esquivando, true);  // Set global variable
                   i = sem_post(&semaphore); // Awake main loop
                   if (i) perror("Error when activating semaphore");
                }
@@ -494,7 +500,7 @@ static int LEDs[4] = { CWIID_LED1_ON,  CWIID_LED1_ON | CWIID_LED2_ON,
      for (i = 0; i < mesg_count; i++) {
         switch (mesg[i].type) {
         case CWIID_MESG_BTN:  // Change in buttons
-            atomic_store_explicit(&mando.buttons, mesg[i].btn_mesg.buttons, memory_order_release);
+            WRITE_ATOMIC(mando.buttons, mesg[i].btn_mesg.buttons);
 
             // Save data from accelerometer in a file. Start and end saving when '2' is pressed
             if (previous_buttons&CWIID_BTN_2 && ~mando.buttons&CWIID_BTN_2) save_accel_data();
@@ -507,7 +513,7 @@ static int LEDs[4] = { CWIID_LED1_ON,  CWIID_LED1_ON | CWIID_LED2_ON,
                     setVolume(soundVolume);
                 } else {  /* ajusta la velocidad del coche y la marca en leds del mando */
                     atomic_fetch_add_explicit(&velocidadCoche, 10, memory_order_relaxed);
-                    if (velocidadCoche > 100) atomic_store_explicit(&velocidadCoche, 100, memory_order_release);
+                    if (velocidadCoche > 100) WRITE_ATOMIC(velocidadCoche, 100);
                     cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
                 }
             }
@@ -520,13 +526,13 @@ static int LEDs[4] = { CWIID_LED1_ON,  CWIID_LED1_ON | CWIID_LED2_ON,
                     setVolume(soundVolume);
                 } else { /* ajusta la velocidad del coche y la marca en leds del mando */
                     atomic_fetch_sub_explicit(&velocidadCoche, 10, memory_order_relaxed);
-                    if (velocidadCoche < 0) atomic_store_explicit(&velocidadCoche, 0, memory_order_release);
+                    if (velocidadCoche < 0) WRITE_ATOMIC(velocidadCoche, 0);
                     cwiid_set_led(wiimote, LEDs[velocidadCoche/26]);
                 }
             }
             
             /*** Botones A, B y RIGHT, LEFT; si estamos esquivando, no: el loop de main tiene el control ***/
-            if (!esquivando) ajustaCocheConMando();
+            if (!READ_ATOMIC(esquivando)) ajustaCocheConMando(READ_ATOMIC(mando.buttons));
     
             /*** pito ***/
             if (~previous_buttons&CWIID_BTN_DOWN && mando.buttons&CWIID_BTN_DOWN) activaPito();    
@@ -559,8 +565,8 @@ void closeWiimote(void)
 {
     printf("Closing wiimote...\n");
     if (mando.wiimote) cwiid_close((cwiid_wiimote_t*)mando.wiimote);
-    atomic_store_explicit(&mando.wiimote, NULL, memory_order_release);
-    atomic_store_explicit(&mando.buttons, 0, memory_order_release);       
+    WRITE_ATOMIC(mando.wiimote, NULL);
+    WRITE_ATOMIC(mando.buttons, 0);       
 }
       
      
@@ -591,7 +597,7 @@ bdaddr_t ba;
     } 
     
     // wiimote found
-    atomic_store_explicit(&mando.wiimote, (_Atomic cwiid_wiimote_t*)wiimote, memory_order_release);
+    WRITE_ATOMIC(mando.wiimote, (_Atomic cwiid_wiimote_t*)wiimote);
     printf("Conectado al mando de la Wii\n");
     oledSetBitmap8x8(15*8, 0, bluetooth_glyph);  // Put BT icon
     cwiid_set_rumble(wiimote, 1);  // señala mediante zumbido el mando sincronizado
@@ -604,20 +610,20 @@ bdaddr_t ba;
    
 static void* scanWiimotes(void *arg)
 {
-    atomic_store_explicit(&scanningWiimote, true, memory_order_release); // signal that scanning is in place
+    WRITE_ATOMIC(scanningWiimote, true); // signal that scanning is in place
     fastStopMotor(&m_izdo); fastStopMotor(&m_dcho);   // Para el coche mientras escanea wiimotes 
-    atomic_store_explicit(&velocidadCoche, 0, memory_order_release);
+    WRITE_ATOMIC(velocidadCoche, 0);
 
     oledWriteString(12*8, 1, "    ", false); // Borra mensaje de "Auto", si está           
     setupWiimote(); 
-    atomic_store_explicit(&velocidadCoche, INITIAL_SPEED, memory_order_release); // Nueva velocidad inicial, con o sin mando 
+    WRITE_ATOMIC(velocidadCoche, INITIAL_SPEED); // Nueva velocidad inicial, con o sin mando 
  
     if (!mando.wiimote && !remoteOnly) {  // No hay mando, coche es autónomo
         oledWriteString(12*8, 1, "Auto", false);
         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);                
     } 
-    atomic_store_explicit(&scanningWiimote, false, memory_order_release);  // signal that scanning is over
+    WRITE_ATOMIC(scanningWiimote, false);  // signal that scanning is over
     return NULL;
 }
 
@@ -657,8 +663,8 @@ static pthread_t pth;
 }
 
 
-/* Read wiimote buttons and adjust speed accordingly */
-void ajustaCocheConMando(void)
+/* Adjust speed accordingly to the pressed wiimote buttons, as passed in the parameter */
+void ajustaCocheConMando(uint16_t buttons)
 {
 int v_izdo, v_dcho;
 Sentido_t s_izdo, s_dcho;
@@ -667,20 +673,20 @@ Sentido_t s_izdo, s_dcho;
    s_izdo = s_dcho = ADELANTE;
    
    /*** Botones A y B, leen la variable global "velocidadCoche" ***/
-   if (mando.wiimote && mando.buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
+   if (READ_ATOMIC(mando.wiimote) && buttons&(CWIID_BTN_A | CWIID_BTN_B)) { // if A or B or both pressed
       v_izdo = v_dcho = velocidadCoche;
-      if (mando.buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
+      if (buttons&CWIID_BTN_A) s_izdo = s_dcho = ADELANTE;
       else s_izdo = s_dcho = ATRAS;  // si vamos marcha atrás (botón B), invierte sentido
     
       /*** Botones LEFT y RIGHT, giran el coche ***/
-      if (mando.buttons&CWIID_BTN_RIGHT) {
+      if (buttons&CWIID_BTN_RIGHT) {
          s_dcho = 1 - s_dcho;  // Invert direction of movement
          if (softTurn) v_dcho = 0;
          else v_dcho = 50;
          v_izdo += 10; 
       } 
             
-      if (mando.buttons&CWIID_BTN_LEFT) {
+      if (buttons&CWIID_BTN_LEFT) {
          s_izdo = 1 - s_izdo;  // Invert direction of movement
          if (softTurn) v_izdo = 0; 
          else v_izdo = 50;
@@ -806,17 +812,14 @@ static int interruptibleWait(int duration)
 int rest, lapse;
 uint32_t startTick;
 const int chunk = 10000;  // 10 ms chunks
-bool in_collision;   
    
    startTick = gpioTick();
 
    while(rest = duration - (gpioTick() - startTick), rest>0) {
       lapse = (rest>chunk)?chunk:rest;
       gpioDelay(lapse);
-      in_collision = atomic_load_explicit(&collision, memory_order_acquire);
-      if (in_collision) return -1;
+      if (READ_ATOMIC(collision)) return -1;
    }
-
    return 0;
 }
 
@@ -889,21 +892,21 @@ routine to finish. So it has the only control of the car.
 static void avoidObstacle(void)
 {
 int rc;
-   
+uint16_t buttons;
+  
    //printf("Obstacle at %d cm, avoiding...\n", distance);
    /** Loop for obstacle avoidance **/
    // distance is atomic, and is set asynchronously in another thread
-   while (atomic_load_explicit(&distance, memory_order_acquire) < DISTMIN) {  
+   while (READ_ATOMIC(distance) < DISTMIN) {  
       /** Check that the button to scan the wiimote was not pressed **/
-      if (scanningWiimote) break;
+      if (READ_ATOMIC(scanningWiimote)) break;
+      buttons = READ_ATOMIC(mando.buttons);
       /** Check that the user keeps pressing A **/
-      if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) break;
+      if (READ_ATOMIC(mando.wiimote) && ~buttons&CWIID_BTN_A) break;
 
-      /**  Rotate the car to avoid obstacle; Rotate for the time to get a new distance measure **/
-      if (mando.wiimote && mando.buttons&CWIID_BTN_LEFT) rc = rota(CCW, ADELANTE, SONARDELAY*1000);  // con LEFT pulsado, esquiva a la izquierda
-      else rc = rota(CW, ADELANTE, SONARDELAY*1000);  // en caso contrario a la derecha
-      
-      if (rc < 0 || atomic_load_explicit(&stalled, memory_order_acquire)) rc = retreatBackwards();  // stalled is a global variable, set by the sonar asynchronously
+      /**  Rotate the car to avoid obstacle; rotate for the time to get a new distance measure **/
+      rc = rota(CW, ADELANTE, SONARDELAY*1000);  
+      if (rc < 0 || READ_ATOMIC(stalled)) rc = retreatBackwards();  // stalled is a global variable, set by the sonar asynchronously
    }
 }
 
@@ -1029,8 +1032,7 @@ void main(int argc, char *argv[])
 {
 int rc;
 double volts;
-bool is_stalled, in_collision;
-uint32_t distance_value;
+uint16_t buttons;
 
    opterr = 0;  // Prevent getopt from outputting error messages
    while ((rc = getopt(argc, argv, "crbesf:")) != -1)
@@ -1054,7 +1056,7 @@ uint32_t distance_value;
                calibrateIMU = true;
                break;
            default:
-               fprintf(stderr, "Uso: %s [-r] [-b] [-e] [-s] [-f <fichero de alarma>]\n", argv[0]);
+               fprintf(stderr, "Uso: %s [-r] [-b] [-e] [-s] [-c] [-f <fichero de alarma>]\n", argv[0]);
                exit(1);
    }
    
@@ -1077,23 +1079,24 @@ uint32_t distance_value;
       oledBigMessage(0, NULL);           
    }
 
-   if (!mando.wiimote && !remoteOnly) {  // No hay mando, el coche es autónomo
-        oledWriteString(12*8, 1, "Auto", false);    
+   if (!READ_ATOMIC(mando.wiimote) && !remoteOnly) {  // No hay mando, el coche es autónomo
+        gpioSleep(PI_TIME_RELATIVE, 0, 500000);   // Espera 0,5 segundos
+        oledWriteString(12*8, 1, "Auto", false); 
+        audioplay("sounds/auto mode.wav", 1);        
    }
    
-   
+   /* Adjust car to move */
+   if (READ_ATOMIC(mando.wiimote) || remoteOnly) ajustaCocheConMando(READ_ATOMIC(mando.buttons));  // wiimote controlled car
+   else {  // autonomous car
+     ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
+     ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);             
+   }      
+         
    /*** Main control loop ***/
    for (;;) {
        /* Signal to sonarEcho that the semaphore can be activated: car is not 'esquivando' */
-       atomic_store_explicit(&esquivando, false, memory_order_release); 
-       
-       /* Adjust car to move */
-       if (mando.wiimote || remoteOnly) ajustaCocheConMando();  // wiimote controlled car
-       else {  // autonomous car
-         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
-         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);             
-       }
-         
+       WRITE_ATOMIC(esquivando, false); 
+
        /* Sleep until semaphore awakens us; it will happen in 3 cases:
           either the distance to an obstacle is below the threshold, or the car is stalled, or there was a collision */
        rc = sem_wait(&semaphore);  
@@ -1101,21 +1104,28 @@ uint32_t distance_value;
          perror("Error waiting for semaphore");
          continue;
        }
-             
-       if (mando.wiimote && ~mando.buttons&CWIID_BTN_A) continue;  // Take action only if A is pressed
-       distance_value = atomic_load_explicit(&distance, memory_order_acquire); 
-       in_collision = atomic_load_explicit(&collision, memory_order_acquire);   
-       is_stalled = atomic_load_explicit(&stalled, memory_order_acquire);   
+       
+       buttons = READ_ATOMIC(mando.buttons);
+       if (READ_ATOMIC(mando.wiimote) && ~buttons&CWIID_BTN_A) continue;  // Take action only if A is pressed
      
        oledBigMessage(0, "OBSTACLE"); 
-       if (in_collision || is_stalled) {
-          printf("Collision!\n");
+       if (READ_ATOMIC(collision) || READ_ATOMIC(stalled)) {
+          ///printf("Collision/stall!\n");
           retreatBackwards(); 
        }
-       else if (distance_value < DISTMIN) avoidObstacle();  // Distance is below threshold       
+       else {
+          ///printf("Esquivando...\n");
+          avoidObstacle();  // Distance is below threshold  
+       }          
 
        /* Obstacle is avoided, go back to normality */
        oledBigMessage(0, NULL);
+       /* Adjust car to move */
+       if (READ_ATOMIC(mando.wiimote) || remoteOnly) ajustaCocheConMando(READ_ATOMIC(mando.buttons));  // wiimote controlled car
+       else {  // autonomous car
+         ajustaMotor(&m_izdo, velocidadCoche, ADELANTE);
+         ajustaMotor(&m_dcho, velocidadCoche, ADELANTE);             
+       }
    }
 }
 

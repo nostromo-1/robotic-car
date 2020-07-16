@@ -144,9 +144,9 @@ static unsigned underVoltageTime = 0;
    if (rc < 0) goto rw_error;
    */
 
-   voltage = factor_v*adc[2];  // Battery voltage level
-   current = factor_i*adc[3];  // Current draw
-   if (adc[1]>10)   // if there is a non-zero reading, a cable is connected at the mid-battery point
+   voltage = factor_v*adc[2];  // Battery voltage level, channel 0
+   current = factor_i*adc[3];  // Current draw, channel 1
+   if (adc[1]>10)   // channel 3, if there is a non-zero reading, a cable is connected at the mid-battery point
       bat1 = factor_v2*adc[1];  // Voltage level at the middle of the battey pack (1 18650 if 2 in series are used)
    else  // if voltage is too low, it means cable is not connected
       bat1 = voltage/2;  // if mid-point cable is not connected, assume this is half the battery voltage
