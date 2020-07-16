@@ -50,7 +50,7 @@ The following packages need to be installed on plain raspbian lite (`sudo apt-ge
 * libcwiid1 libcwiid-dev
 * libasound2-dev
 
-After installing them copy the code files, the Makefile and the sounds directory, and run `make robot`. After compiling, run it with `./robot -b -s`. If wheel encoders are used, add `-e` to activate the PID control loop. It is a SUID program, but it drops privileges at the beginning of execution.
+After installing them copy the Makefile, the src directory and the sounds directory, and run `make robot`. After compiling, run it with `./robot -b -s`. If wheel encoders are used, add `-e` to activate the PID control loop. It is a SUID program, but it drops privileges at the beginning of execution.
 
 
   
