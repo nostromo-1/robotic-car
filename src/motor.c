@@ -216,7 +216,7 @@ void fastStopMotor(Motor_t *motor)
 /* v va de 0 a 100 */
 void ajustaMotor(Motor_t *motor, int v, Sentido_t sentido)
 {    
-///printf("Set %s motor %d\n", motor->id, (sentido==ADELANTE)?v:-v);
+//printf("Set %s motor %d\n", motor->id, (sentido==ADELANTE)?v:-v);
     if (v > 100) v = 100;
     if (v < 0) {
         fprintf(stderr, "Error en ajustaMotor: v<0!\n");
@@ -348,13 +348,13 @@ bool in_collision, is_stalled;
            }
            
            /* If the stalled time is above threshold, set global variable "stalled" as true, otherwise as false */
-           is_stalled = false; ////stalledTime >= maxStalledTime;
+           is_stalled = stalledTime >= maxStalledTime;
            WRITE_ATOMIC(stalled, is_stalled); 
            
            /* Activate semaphore to indicate main loop that it must awake;
               check specific situations first, and then activate semaphore if one of two conditions is met:
               either the distance to obstacle is below threshold or the car is stalled (below or over threshold)*/
-           if (!remoteOnly && !scanningWiimote && !READ_ATOMIC(esquivando)) {
+           if (!remoteOnly && !READ_ATOMIC(scanningWiimote) && !READ_ATOMIC(esquivando)) {
                in_collision = READ_ATOMIC(collision);
                if (distance_local < DISTMIN || is_stalled || in_collision) {
                   WRITE_ATOMIC(esquivando, true);  // Set global variable
@@ -1110,11 +1110,11 @@ uint16_t buttons;
      
        oledBigMessage(0, "OBSTACLE"); 
        if (READ_ATOMIC(collision) || READ_ATOMIC(stalled)) {
-          ///printf("Collision/stall!\n");
+          //printf("Collision/stall!\n");
           retreatBackwards(); 
        }
        else {
-          ///printf("Esquivando...\n");
+          //printf("Esquivando...\n");
           avoidObstacle();  // Distance is below threshold  
        }          
 
